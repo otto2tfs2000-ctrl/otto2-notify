@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Otto2 ARTCLUB 線上預約</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet">
+<script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<style>
+:root{
+  --navy:#1E2B4F; --gold:#E3B34C; --paper:#F7F5F0; --card:#FFF;
+  --ink:#2A2E38; --ink-soft:#6B7180; --line:#E4E1D9; --sel:#EEF1FA;
+  --ok:#2E7D4F; --warn:#C0392B;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{font-family:'Noto Sans TC',system-ui,sans-serif;background:var(--paper);color:var(--ink);padding-bottom:110px}
+.hero{background:var(--navy);color:#fff;padding:20px 20px 14px;position:relative}
+.hero .brand{display:flex;align-items:center;gap:10px}
+.hero .star{color:var(--gold);font-size:18px}
+.hero h1{font-size:19px;font-weight:900;letter-spacing:.5px}
+.steps{display:flex;gap:6px;margin-top:14px}
+.steps i{flex:1;height:4px;border-radius:99px;background:rgba(255,255,255,.22);font-style:normal}
+.steps i.on{background:var(--gold)}
+.stepname{font-size:12.5px;opacity:.8;margin-top:8px}
+.tabs{position:sticky;top:0;z-index:20;background:var(--paper);display:flex;gap:4px;overflow-x:auto;padding:12px 14px 0;border-bottom:1.5px solid var(--line);scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{flex:0 0 auto;padding:9px 14px 11px;font-size:14.5px;font-weight:500;color:var(--ink-soft);border:none;background:none;border-bottom:2.5px solid transparent;white-space:nowrap}
+.tab.on{color:var(--navy);font-weight:700;border-bottom-color:var(--gold)}
+.list{padding:16px 14px 8px;display:flex;flex-direction:column;gap:12px}
+.card{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:14px;display:flex;gap:12px;position:relative;transition:.15s}
+.card.sel{border-color:var(--navy);background:var(--sel)}
+.card .pic{flex:0 0 76px;height:76px;border-radius:10px;background:var(--navy) center/cover no-repeat;display:flex;align-items:center;justify-content:center;color:var(--gold);font-size:22px}
+.card .body{flex:1;min-width:0}
+.card h3{font-size:15.5px;font-weight:700;color:var(--navy);line-height:1.35;padding-right:20px}
+.card .desc{font-size:13px;color:var(--ink-soft);margin-top:4px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.card .meta{display:flex;gap:8px;margin-top:9px;flex-wrap:wrap}
+.chip{font-size:12px;padding:3px 9px;border-radius:99px;background:var(--paper);border:1px solid var(--line)}
+.chip.price{font-weight:700;color:var(--navy);border-color:#CFD6E8}
+.tick{position:absolute;top:10px;right:10px;width:22px;height:22px;border-radius:50%;border:1.5px solid var(--line);background:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;color:#fff}
+.card.sel .tick{background:var(--navy);border-color:var(--navy)}
+.vars,.addons{display:none;margin-top:11px;padding-top:11px;border-top:1px dashed #C9CFDF}
+.card.sel .vars,.card.sel .addons{display:block}
+.vtitle{font-size:12.5px;color:var(--ink-soft);margin-bottom:7px}
+.vrow{display:flex;gap:8px;flex-wrap:wrap}
+.vopt{padding:7px 13px;border-radius:9px;border:1.5px solid var(--line);background:#fff;font-size:13.5px;font-family:inherit}
+.vopt.on{border-color:var(--navy);background:var(--navy);color:#fff;font-weight:700}
+.aopt{display:flex;justify-content:space-between;align-items:center;width:100%;padding:9px 12px;border-radius:9px;border:1.5px solid var(--line);background:#fff;font-size:13.5px;font-family:inherit;margin-bottom:7px;text-align:left}
+.aopt .ap{color:var(--ink-soft);font-size:12.5px;flex:0 0 auto;margin-left:8px}
+.aopt.on{border-color:var(--navy);background:var(--sel)}
+.aopt.on .abox{background:var(--navy);border-color:var(--navy)}
+.abox{width:18px;height:18px;border-radius:5px;border:1.5px solid var(--line);display:inline-flex;align-items:center;justify-content:center;color:#fff;font-size:11px;margin-right:9px;flex:0 0 auto}
+.aopt .aname{flex:1;display:flex;align-items:center}
+.qty{display:none;margin-top:11px;align-items:center;gap:12px}
+.card.sel .qty{display:flex}
+.qty span{font-size:13px;color:var(--ink-soft)}
+.stepper{display:flex;border:1.5px solid var(--navy);border-radius:9px;overflow:hidden}
+.stepper button{width:34px;height:32px;border:none;background:#fff;font-size:18px;color:var(--navy);font-weight:700}
+.stepper b{width:36px;text-align:center;font-size:15px;background:#fff;line-height:32px}
+.state{padding:48px 24px;text-align:center;color:var(--ink-soft);font-size:14px;line-height:1.7}
+.calwrap{padding:16px 14px}
+.calhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.calhead h2{font-size:17px;color:var(--navy)}
+.calhead button{border:1.5px solid var(--line);background:#fff;border-radius:9px;width:36px;height:34px;font-size:16px;color:var(--navy)}
+.grid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}
+.grid .wd{text-align:center;font-size:12px;color:var(--ink-soft);padding:6px 0}
+.day{aspect-ratio:1;border-radius:10px;border:1.5px solid transparent;background:none;font-size:14.5px;font-family:inherit;color:var(--ink)}
+.day.off{color:#C5C8D0}
+.day.avail{background:#fff;border-color:var(--line)}
+.day.on{background:var(--navy);color:#fff;font-weight:700}
+.slots{margin-top:16px;background:#fff;border:1.5px solid var(--line);border-radius:14px;padding:14px}
+.slots h3{font-size:14px;color:var(--navy);margin-bottom:11px}
+.slotrow{display:flex;flex-direction:column;gap:9px}
+.slot{display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border:1.5px solid var(--line);border-radius:11px;background:#fff;font-family:inherit;font-size:15px}
+.slot .left{font-weight:700;color:var(--navy)}
+.slot .cap{font-size:12.5px;color:var(--ok)}
+.slot .cap.low{color:var(--warn)}
+.slot.on{border-color:var(--navy);background:var(--sel)}
+.slot:disabled{opacity:.45}
+.form{padding:16px 14px;display:flex;flex-direction:column;gap:13px}
+.field label{display:block;font-size:13px;color:var(--ink-soft);margin-bottom:6px}
+.field input,.field textarea{width:100%;padding:12px 13px;border:1.5px solid var(--line);border-radius:11px;font-size:15px;font-family:inherit;background:#fff}
+.field input:focus,.field textarea:focus{outline:none;border-color:var(--navy)}
+.recap{background:#fff;border:1.5px solid var(--line);border-radius:14px;padding:14px;font-size:14px;line-height:1.8}
+.recap b{color:var(--navy)}
+.dep{display:flex;flex-direction:column;gap:9px}
+.dopt{display:flex;justify-content:space-between;align-items:center;padding:13px 14px;border:1.5px solid var(--line);border-radius:11px;background:#fff;font-family:inherit;font-size:14.5px;text-align:left}
+.dopt.on{border-color:var(--navy);background:var(--sel)}
+.dopt b{color:var(--navy)}
+.dopt .dsub{font-size:12px;color:var(--ink-soft);margin-top:2px}
+.dopt .dtag{flex:0 0 auto;font-size:12.5px;font-weight:700;color:var(--navy);margin-left:10px}
+.paybtn{display:block;margin:18px auto 0;padding:14px 26px;background:#06C755;color:#fff;border-radius:12px;font-size:16px;font-weight:700;text-decoration:none;max-width:280px}
+.done{padding:56px 26px;text-align:center}
+.done .big{font-size:44px}
+.done h2{font-size:19px;color:var(--navy);margin:12px 0 8px}
+.done p{font-size:14px;color:var(--ink-soft);line-height:1.7}
+.bar{position:fixed;left:0;right:0;bottom:0;z-index:30;background:#fff;border-top:1.5px solid var(--line);padding:12px 14px calc(12px + env(safe-area-inset-bottom))}
+.bar .sum{display:flex;justify-content:space-between;font-size:13.5px;color:var(--ink-soft);margin-bottom:9px}
+.bar .sum b{color:var(--navy);font-size:15px}
+.bar .sum .clear{color:var(--ink-soft);text-decoration:underline;background:none;border:none;font-size:13px}
+.btnrow{display:flex;gap:9px}
+.back{flex:0 0 52px;border:1.5px solid var(--navy);background:#fff;color:var(--navy);border-radius:12px;font-size:18px}
+.next{flex:1;padding:14px;border:none;border-radius:12px;background:var(--navy);color:#fff;font-size:16.5px;font-weight:700;letter-spacing:2px;font-family:inherit}
+.next:disabled{background:#B8BCC7}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="brand"><span class="star">★</span><h1>Otto2 ARTCLUB 線上預約</h1></div>
+  <div class="steps"><i id="st1" class="on"></i><i id="st2"></i><i id="st3"></i></div>
+  <div class="stepname" id="stepname">步驟 1／3：選擇課程</div>
+  <div style="position:absolute;top:6px;right:10px;font-size:10px;opacity:.4">v1.9</div>
+</header>
+
+<div id="view"></div>
+
+<footer class="bar" id="bar">
+  <div class="sum">
+    <span>已選 <b id="sumItems">0</b> 項 ・ <b id="sumPeople">0</b> 位 ・ <b id="sumPrice">NT$0</b></span>
+    <button class="clear" id="btnClear">清空</button>
+  </div>
+  <div class="btnrow">
+    <button class="back" id="btnBack" style="display:none">←</button>
+    <button class="next" id="btnNext" disabled>選擇日期和時間 →</button>
+  </div>
+</footer>
+
+<script>
+/* ════════ 設定區 ════════ */
+const SHEET_ID     = "1QjiDwmPcwbmdhmNv9cz1A6veC_BbC75m1VJG85P3Q6M";
+const FIREBASE_URL = "https://otto2-booking-f9ef7-default-rtdb.asia-southeast1.firebasedatabase.app";
+const MAX_PEOPLE   = 6;          // 單筆預約人數上限
+const DEPOSIT_AMOUNT = 600;      // 訂金／點數預扣金額
+const LINEPAY_URL  = "https://reurl.cc/O5Qe23";
+const LIFF_ID      = "2010906803-FMDYktUN";
+const NOTIFY_URL   = "";   // ← Railway 部署後貼上服務網址
+const SEAT_CAP     = 13;         // 教室座位硬上限
+const CAP_PER_TEACHER = 5;       // 每位老師可帶人數
+/* 基準週班表：0=日,1=一...6=六（班表工作表填了例外日會覆蓋這裡） */
+const BASE_WEEK = {0:0, 1:2, 2:2, 3:2, 4:2, 5:2, 6:3};
+const SLOTS = ["10:00-12:00","14:00-16:00","16:00-18:00"];
+
+const DEMO_COURSES = [
+ ["每月主打","本月主打-黑光煙火","夜空綻放的螢光煙火，完成後會發亮","","2小時",1600,"","Y",1],
+ ["每月主打","動物系列-毛孩透明框","親手描繪毛孩最可愛的模樣","","2小時",1600,"","Y",2],
+ ["我想輕鬆玩-多媒材課程","海洋系列-流動畫","流動畫創作，完成後可帶回","30cm","1.5-2小時",1500,"","Y",1],
+ ["我想輕鬆玩-多媒材課程","海洋系列-流動畫","流動畫創作，完成後可帶回","40cm","1.5-2小時",2300,"","Y",1],
+ ["我想輕鬆玩-多媒材課程","透明框油畫-寵物肖像","畫布31*23cm","標準","2.5-3小時",1300,"","Y",5],
+ ["我想輕鬆玩-多媒材課程","透明框油畫-寵物肖像","畫布31*23cm","背景加鏡面流動","2.5-3小時",1600,"","Y",5],
+ ["我想學畫畫-繪畫、創作、素描","零基礎繪畫體驗","老師一步步帶，零基礎也能完成","","2小時",1400,"","Y",1],
+];
+const DEMO_ADDONS = [
+ ["海洋系列-流動畫","加 1 個擴香石海洋流動",400,1],
+ ["海洋系列-流動畫","40cm 圓形流動鏡",800,2],
+ ["海洋系列-流動畫","35cm 圓形流動鐘",900,3],
+ ["透明框油畫-寵物肖像","加購透明框-海中精靈",300,1],
+];
+let DEMO_BOOKINGS = [];
+
+let step=1, groups=[], cats=[], activeCat="", picks={};
+/* picks: gid -> {variantIdx, qty, addons:{addonIdx:true}} */
+let addonsByCourse={};           // 課程名稱 -> [{name,price,sort}]
+let schedule={}, bookedMap={};
+let calY, calM, selDate="", selSlot="";
+let customer={name:"",phone:"",note:""};
+let deposit="";   // "linepay" | "points"
+let lineUser=null; // {userId, displayName}
+
+const pNum=r=>{const m=String(r).replace(/,/g,"").match(/\d+/);return m?+m[0]:0};
+const pLabel=r=>{const n=pNum(r);return n?"NT$"+n.toLocaleString():"現場報價"};
+const pad=n=>String(n).padStart(2,"0");
+const dstr=(y,m,d)=>`${y}/${pad(m)}/${pad(d)}`;
+
+async function initLiff(){
+  if(!window.liff||!LIFF_ID)return;
+  try{
+    await liff.init({liffId:LIFF_ID});
+    if(liff.isInClient()&&!liff.isLoggedIn()){liff.login();return}
+    if(liff.isLoggedIn()){
+      const p=await liff.getProfile();
+      lineUser={userId:p.userId,displayName:p.displayName};
+      if(FIREBASE_URL){
+        try{
+          const m=await (await fetch(FIREBASE_URL.replace(/\/$/,"")+"/members/"+p.userId+".json")).json();
+          if(m){customer.name=customer.name||m.name||"";customer.phone=customer.phone||m.phone||""}
+        }catch(e){}
+      }
+      if(!customer.name)customer.name=p.displayName||"";
+    }
+  }catch(e){/* 外部瀏覽器或初始化失敗照常以訪客模式運作 */}
+}
+/* 各工作表的欄位順序（備援通道要靠標題對回欄位） */
+const SHEET_HEADERS={
+  "課程":["分類","課程名稱","說明","規格","時長","價格","圖片網址","上架","排序"],
+  "班表":["日期","排班老師","可開課老師數","備註"],
+  "加購":["課程名稱","加購名稱","加價","排序"]
+};
+async function gviz(sheet){
+  const url=`https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?sheet=${encodeURIComponent(sheet)}&tqx=out:json`;
+  let lastErr;
+  /* 主通道：Google gviz */
+  try{
+    const res=await fetch(url);
+    if(!res.ok)throw new Error("Google 回應 HTTP "+res.status);
+    const t=await res.text();
+    const a=t.indexOf("{"),b=t.lastIndexOf("}");
+    if(a<0||b<0)throw new Error("回應不是資料格式");
+    const j=JSON.parse(t.substring(a,b+1));
+    if(!j.table)throw new Error("找不到工作表「"+sheet+"」");
+    return j.table.rows.map(r=>r.c.map(c=>c?(c.f??c.v):""));
+  }catch(e){lastErr=e}
+  /* 備援通道：opensheet 代理（回傳以標題為鍵的物件陣列，轉回欄位順序） */
+  try{
+    const res2=await fetch(`https://opensheet.elte.hu/${SHEET_ID}/${encodeURIComponent(sheet)}`);
+    if(!res2.ok)throw new Error("備援回應 HTTP "+res2.status);
+    const arr=await res2.json();
+    const hs=SHEET_HEADERS[sheet]||[];
+    return arr.map(o=>hs.map(h=>o[h]??""));
+  }catch(e2){
+    throw new Error("主通道："+(lastErr?lastErr.message:"?")+"／備援："+e2.message);
+  }
+}
+function rowsToGroups(rows){
+  const items=rows.map(r=>({cat:String(r[0]||"").trim(),name:String(r[1]||"").trim(),desc:String(r[2]||"").trim(),spec:String(r[3]||"").trim(),dur:String(r[4]||"").trim(),priceRaw:String(r[5]??"").trim(),img:String(r[6]||"").trim(),on:String(r[7]||"Y").trim().toUpperCase()!=="N",sort:+r[8]||99})).filter(c=>c.name&&c.on);
+  const map=new Map();
+  for(const it of items){
+    const k=it.cat+"|"+it.name;
+    if(!map.has(k)) map.set(k,{id:"g"+map.size,cat:it.cat,name:it.name,desc:it.desc,dur:it.dur,img:it.img,sort:it.sort,variants:[]});
+    map.get(k).variants.push({spec:it.spec,priceRaw:it.priceRaw});
+  }
+  return [...map.values()].sort((a,b)=>a.sort-b.sort);
+}
+function rowsToAddons(rows){
+  addonsByCourse={};
+  rows.forEach(r=>{
+    const cname=String(r[0]||"").trim(), aname=String(r[1]||"").trim();
+    if(!cname||!aname)return;
+    (addonsByCourse[cname]=addonsByCourse[cname]||[]).push({name:aname,price:pNum(r[2]),sort:+r[3]||99});
+  });
+  for(const k in addonsByCourse) addonsByCourse[k].sort((a,b)=>a.sort-b.sort);
+}
+async function loadCourses(){
+  if(!SHEET_ID){groups=rowsToGroups(DEMO_COURSES);rowsToAddons(DEMO_ADDONS);return}
+  let rows=await gviz("課程");
+  if(rows.length&&String(rows[0][0]).trim()==="分類")rows.shift();
+  groups=rowsToGroups(rows);
+  try{
+    let a=await gviz("加購");
+    if(a.length&&String(a[0][0]).trim()==="課程名稱")a.shift();
+    rowsToAddons(a);
+  }catch(e){addonsByCourse={}}   // 沒有「加購」工作表也能正常跑
+}
+async function loadSchedule(){
+  schedule={};
+  if(SHEET_ID){
+    try{
+      let rows=await gviz("班表");
+      if(rows.length&&String(rows[0][0]).trim()==="日期")rows.shift();
+      for(const r of rows){
+        const d=String(r[0]||"").trim().replace(/-/g,"/");
+        const v=String(r[2]??"").trim();
+        if(d&&v!=="") schedule[d]=Math.max(0,+v||0);
+      }
+    }catch(e){}
+  }
+  if(FIREBASE_URL){
+    try{
+      const j=await (await fetch(FIREBASE_URL.replace(/\/$/,"")+"/schedule.json")).json();
+      if(j)for(const k in j){
+        const v=j[k];
+        if(v!==null&&v!==undefined&&v!=="")schedule[k.replace(/-/g,"/")]=Math.max(0,+v||0);
+      }
+    }catch(e){}
+  }
+}
+async function loadBookings(){
+  bookedMap={};
+  let all=[];
+  if(FIREBASE_URL){
+    try{const j=await (await fetch(FIREBASE_URL.replace(/\/$/,"")+"/bookings.json")).json();if(j)all=Object.values(j)}catch(e){}
+  }else all=DEMO_BOOKINGS;
+  for(const b of all){
+    if(b.status==="cancelled")continue;
+    const k=b.date+"|"+b.slot;
+    bookedMap[k]=(bookedMap[k]||0)+(+b.people||0);
+  }
+}
+/* 老師數：班表例外優先，否則用基準週 */
+function teachersOn(d){
+  if(schedule[d]!==undefined)return schedule[d];
+  const [y,m,dd]=d.split("/").map(Number);
+  return BASE_WEEK[new Date(y,m-1,dd).getDay()]??1;
+}
+const capOf=d=>Math.min(teachersOn(d)*CAP_PER_TEACHER, SEAT_CAP);
+const leftOf=(d,s)=>capOf(d)-(bookedMap[d+"|"+s]||0);
+/* 時段是否已過：日期在今天之前，或就是今天且時段開始時間已過 */
+function slotPassed(d,slot){
+  const now=new Date();
+  const today=dstr(now.getFullYear(),now.getMonth()+1,now.getDate());
+  if(d<today)return true;
+  if(d>today)return false;
+  const m=slot.match(/^(\d{1,2}):(\d{2})/);
+  if(!m)return false;
+  return now.getHours()*60+now.getMinutes() >= (+m[1])*60+(+m[2]);
+}
+
+const totalPeople=()=>Object.values(picks).reduce((s,p)=>s+p.qty,0);
+function pickPrice(id){
+  const g=groups.find(x=>x.id===id),p=picks[id];
+  let sum=pNum(g.variants[p.variantIdx].priceRaw)*p.qty;
+  const ads=addonsByCourse[g.name]||[];
+  for(const i in p.addons) if(p.addons[i]&&ads[i]) sum+=ads[i].price;
+  return sum;
+}
+const totalPrice=()=>Object.keys(picks).reduce((s,id)=>s+pickPrice(id),0);
+
+function setStep(n){
+  step=n;
+  for(let i=1;i<=3;i++)document.getElementById("st"+i).className=i<=n?"on":"";
+  document.getElementById("stepname").textContent=["","步驟 1／3：選擇課程","步驟 2／3：選擇日期時段","步驟 3／3：確認與聯絡資料"][n];
+  document.getElementById("btnBack").style.display=n>1?"block":"none";
+  render();
+}
+function updateBar(){
+  document.getElementById("sumItems").textContent=Object.keys(picks).length;
+  document.getElementById("sumPeople").textContent=totalPeople();
+  document.getElementById("sumPrice").textContent="NT$"+totalPrice().toLocaleString();
+  const btn=document.getElementById("btnNext");
+  if(step===1){btn.textContent="選擇日期和時間 →";btn.disabled=!Object.keys(picks).length}
+  if(step===2){btn.textContent="填寫聯絡資料 →";btn.disabled=!(selDate&&selSlot)}
+  if(step===3){btn.textContent="完成預約";btn.disabled=!(customer.name.trim()&&customer.phone.trim()&&deposit)}
+}
+function render(){
+  if(step===1)renderCourses();
+  if(step===2)renderCalendar();
+  if(step===3)renderForm();
+  updateBar();
+}
+function priceChip(g){
+  const ns=g.variants.map(v=>pNum(v.priceRaw)).filter(Boolean);
+  if(!ns.length)return"現場報價";
+  const mn=Math.min(...ns),mx=Math.max(...ns);
+  return mn===mx?"NT$"+mn.toLocaleString():"NT$"+mn.toLocaleString()+"起";
+}
+function renderCourses(){
+  cats=[...new Set(groups.map(g=>g.cat))];
+  if(!cats.includes(activeCat))activeCat=cats[0]||"";
+  const v=document.getElementById("view");
+  v.innerHTML=`<nav class="tabs" id="tabs">${cats.map(c=>`<button class="tab ${c===activeCat?'on':''}" data-cat="${c}">${c}</button>`).join("")}</nav><main class="list" id="list"></main>`;
+  v.querySelectorAll(".tab").forEach(b=>b.onclick=()=>{activeCat=b.dataset.cat;render()});
+  const list=v.querySelector("#list");
+  const show=groups.filter(g=>g.cat===activeCat);
+  list.innerHTML=show.map(g=>{
+    const p=picks[g.id],multi=g.variants.length>1,ads=addonsByCourse[g.name]||[];
+    return `<div class="card ${p?'sel':''}" data-id="${g.id}">
+      <div class="pic" ${g.img?`style="background-image:url('${g.img}')"`:''}>${g.img?'':'★'}</div>
+      <div class="body">
+        <h3>${g.name}</h3>
+        ${g.desc?`<div class="desc">${g.desc}</div>`:''}
+        <div class="meta">${g.dur?`<span class="chip">⏱ ${g.dur}</span>`:''}<span class="chip price">${priceChip(g)}</span></div>
+        ${multi?`<div class="vars"><div class="vtitle">選擇規格</div><div class="vrow">${g.variants.map((vv,i)=>`<button class="vopt ${p&&p.variantIdx===i?'on':''}" data-v="${i}">${vv.spec||('款式'+(i+1))}　${pLabel(vv.priceRaw)}</button>`).join("")}</div></div>`:''}
+        ${ads.length?`<div class="addons"><div class="vtitle">加購（可複選）</div>${ads.map((a,i)=>`<button class="aopt ${p&&p.addons&&p.addons[i]?'on':''}" data-a="${i}"><span class="aname"><span class="abox">✓</span>${a.name}</span><span class="ap">＋NT$${a.price.toLocaleString()}</span></button>`).join("")}</div>`:''}
+        <div class="qty"><span>這門課幾位？</span><div class="stepper"><button data-act="minus">−</button><b>${p?p.qty:1}</b><button data-act="plus">＋</button></div></div>
+      </div><div class="tick">✓</div></div>`;
+  }).join("")||`<div class="state">這個分類目前沒有上架課程。</div>`;
+  list.querySelectorAll(".card").forEach(el=>{
+    const id=el.dataset.id;
+    el.onclick=e=>{
+      let t=e.target;
+      while(t&&t!==el&&!t.dataset.v&&!t.dataset.a&&!t.dataset.act)t=t.parentElement;
+      if(t&&t.dataset.v!==undefined){
+        if(!picks[id])picks[id]={variantIdx:+t.dataset.v,qty:1,addons:{}};
+        else picks[id].variantIdx=+t.dataset.v;
+        render();return}
+      if(t&&t.dataset.a!==undefined){
+        if(!picks[id])picks[id]={variantIdx:0,qty:1,addons:{}};
+        picks[id].addons=picks[id].addons||{};
+        picks[id].addons[t.dataset.a]=!picks[id].addons[t.dataset.a];
+        render();return}
+      if(t&&t.dataset.act){
+        const p=picks[id];if(!p)return;
+        if(t.dataset.act==="plus"&&totalPeople()<MAX_PEOPLE)p.qty++;
+        if(t.dataset.act==="minus")p.qty>1?p.qty--:delete picks[id];
+        render();return}
+      if(picks[id])delete picks[id];
+      else if(totalPeople()<MAX_PEOPLE)picks[id]={variantIdx:0,qty:1,addons:{}};
+      else alert(`單筆預約最多 ${MAX_PEOPLE} 位，人數較多請分開預約或私訊小編安排。`);
+      render();
+    };
+  });
+}
+function renderCalendar(){
+  const now=new Date();
+  if(!calY){calY=now.getFullYear();calM=now.getMonth()+1}
+  const first=new Date(calY,calM-1,1);
+  const days=new Date(calY,calM,0).getDate();
+  const startW=(first.getDay()+6)%7;
+  const today=dstr(now.getFullYear(),now.getMonth()+1,now.getDate());
+  let cells=`${["一","二","三","四","五","六","日"].map(w=>`<div class="wd">${w}</div>`).join("")}`;
+  for(let i=0;i<startW;i++)cells+=`<div></div>`;
+  for(let d=1;d<=days;d++){
+    const ds=dstr(calY,calM,d);
+    const past=SLOTS.every(s=>slotPassed(ds,s));
+    const anyLeft=SLOTS.some(s=>!slotPassed(ds,s)&&leftOf(ds,s)>=totalPeople());
+    const dis=past||teachersOn(ds)===0||!anyLeft;
+    cells+=`<button class="day ${dis?'off':'avail'} ${ds===selDate?'on':''}" data-d="${ds}" ${dis?'disabled':''}>${d}</button>`;
+  }
+  let slotHtml="";
+  if(selDate){
+    slotHtml=`<div class="slots"><h3>${selDate} 可預約時段（本組 ${totalPeople()} 位）</h3><div class="slotrow">${
+      SLOTS.map(s=>{
+        const passed=slotPassed(selDate,s);
+        const left=leftOf(selDate,s),full=left<totalPeople();
+        const dis=passed||full;
+        const capText=passed?'已過時間':(full?'名額已滿・想同行加人請私訊小編':'剩 '+left+' 位');
+        return `<button class="slot ${s===selSlot?'on':''}" data-s="${s}" ${dis?'disabled':''}>
+          <span class="left">${s}</span>
+          <span class="cap ${passed?'':(left<=3?'low':'')}">${capText}</span></button>`;
+      }).join("")}</div></div>`;
+  }
+  const v=document.getElementById("view");
+  v.innerHTML=`<div class="calwrap">
+    <div class="calhead"><button id="pm">‹</button><h2>${calY} 年 ${calM} 月</h2><button id="nm">›</button></div>
+    <div class="grid">${cells}</div>${slotHtml}
+  </div>`;
+  v.querySelector("#pm").onclick=()=>{calM--;if(calM<1){calM=12;calY--}selDate="";selSlot="";render()};
+  v.querySelector("#nm").onclick=()=>{calM++;if(calM>12){calM=1;calY++}selDate="";selSlot="";render()};
+  v.querySelectorAll(".day.avail").forEach(b=>b.onclick=()=>{selDate=b.dataset.d;selSlot="";render()});
+  v.querySelectorAll(".slot").forEach(b=>b.onclick=()=>{selSlot=b.dataset.s;render()});
+}
+function pickSummary(id){
+  const g=groups.find(x=>x.id===id),p=picks[id],vv=g.variants[p.variantIdx];
+  const ads=addonsByCourse[g.name]||[];
+  const chosen=Object.keys(p.addons||{}).filter(i=>p.addons[i]&&ads[i]).map(i=>ads[i].name);
+  return `${g.name}${vv.spec?'（'+vv.spec+'）':''} × ${p.qty}位${chosen.length?'<br><span style="font-size:12.5px;color:var(--ink-soft)">加購：'+chosen.join("、")+'</span>':''}`;
+}
+function renderForm(){
+  const items=Object.keys(picks).map(pickSummary).join("<br>");
+  const v=document.getElementById("view");
+  v.innerHTML=`<div class="form">
+    <div class="recap"><b>${selDate}　${selSlot}</b><br>${items}<br>共 ${totalPeople()} 位・合計 <b>NT$${totalPrice().toLocaleString()}</b></div>
+    <div class="field"><label>姓名 *</label><input id="fName" value="${customer.name}" placeholder="請填寫聯絡人姓名"></div>
+    <div class="field"><label>手機 *</label><input id="fPhone" value="${customer.phone}" inputmode="tel" placeholder="09xx-xxx-xxx"></div>
+    <div class="field"><label>備註</label><textarea id="fNote" rows="3" placeholder="特殊需求、想做的圖案等">${customer.note}</textarea></div>
+    <div class="field"><label>訂金方式 *</label><div class="dep">
+      <button class="dopt ${deposit==='linepay'?'on':''}" data-dep="linepay">
+        <span><b>新客・LINE Pay 訂金</b><div class="dsub">送出後付款 NT$${DEPOSIT_AMOUNT}，完成截圖回傳 LINE</div></span>
+        <span class="dtag">NT$${DEPOSIT_AMOUNT}</span></button>
+      <button class="dopt ${deposit==='points'?'on':''}" data-dep="points">
+        <span><b>會員・點數折抵</b><div class="dsub">預扣 ${DEPOSIT_AMOUNT} 點，上課當日核銷</div></span>
+        <span class="dtag">${DEPOSIT_AMOUNT} 點</span></button>
+    </div></div>
+  </div>`;
+  v.querySelectorAll(".dopt").forEach(b=>b.onclick=()=>{deposit=b.dataset.dep;render()});
+  ["fName","fPhone","fNote"].forEach(id=>{
+    v.querySelector("#"+id).oninput=()=>{
+      customer={name:v.querySelector("#fName").value,phone:v.querySelector("#fPhone").value,note:v.querySelector("#fNote").value};
+      updateBar();
+    };
+  });
+}
+function renderDone(id){
+  document.getElementById("bar").style.display="none";
+  const payHtml = deposit==="linepay"
+    ? `<a class="paybtn" href="${LINEPAY_URL}" target="_blank">前往 LINE Pay 付訂金 NT$${DEPOSIT_AMOUNT}</a>
+       <p style="margin-top:12px">付款完成後請<b>截圖回傳 LINE</b>，<br>小編確認訂金後預約才算保留成功。</p>`
+    : `<p style="margin-top:12px">我們將為你<b>預扣 ${DEPOSIT_AMOUNT} 點</b>作為訂金，<br>小編確認點數後會透過 LINE 回覆你。</p>`;
+  document.getElementById("view").innerHTML=`<div class="done">
+    <div class="big">★</div><h2>預約完成！</h2>
+    <p><b>${selDate}　${selSlot}</b><br>共 ${totalPeople()} 位・NT$${totalPrice().toLocaleString()}<br>
+    ${FIREBASE_URL?'':'（示範模式，未實際寫入）'}編號：${id}</p>
+    ${payHtml}</div>`;
+}
+async function submitBooking(){
+  if(slotPassed(selDate,selSlot)){
+    alert("這個時段已經開始了，請重新選擇時間。");setStep(2);selSlot="";return;
+  }
+  await loadBookings();
+  if(leftOf(selDate,selSlot)<totalPeople()){
+    alert("這個時段名額剛被約走，請重新選時段。");setStep(2);return;
+  }
+  const rec={
+    date:selDate, slot:selSlot,
+    items:Object.keys(picks).map(id=>{
+      const g=groups.find(x=>x.id===id),p=picks[id],vv=g.variants[p.variantIdx];
+      const ads=addonsByCourse[g.name]||[];
+      return{name:g.name,spec:vv.spec,qty:p.qty,price:pNum(vv.priceRaw),
+        addons:Object.keys(p.addons||{}).filter(i=>p.addons[i]&&ads[i]).map(i=>({name:ads[i].name,price:ads[i].price}))};
+    }),
+    people:totalPeople(), total:totalPrice(),
+    customer:{...customer}, status:"new",
+    deposit:{method:deposit, amount:DEPOSIT_AMOUNT, status:"pending"},
+    line:lineUser?{userId:lineUser.userId,displayName:lineUser.displayName}:null,
+    source:"web", ts:new Date().toISOString()
+  };
+  let id="DEMO-"+Math.random().toString(36).slice(2,7).toUpperCase();
+  if(FIREBASE_URL){
+    const res=await fetch(FIREBASE_URL.replace(/\/$/,"")+"/bookings.json",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(rec)});
+    const j=await res.json(); id=j.name?j.name.slice(-6).toUpperCase():id;
+  }else DEMO_BOOKINGS.push(rec);
+  if(NOTIFY_URL&&lineUser){
+    fetch(NOTIFY_URL.replace(/\/$/,"")+"/notify/booking",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(rec)}).catch(()=>{});
+  }
+  if(FIREBASE_URL&&lineUser){
+    fetch(FIREBASE_URL.replace(/\/$/,"")+"/members/"+lineUser.userId+".json",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:customer.name,phone:customer.phone,displayName:lineUser.displayName,lastBooking:rec.ts})}).catch(()=>{});
+  }
+  renderDone(id);
+}
+document.getElementById("btnClear").onclick=()=>{picks={};selDate="";selSlot="";render()};
+document.getElementById("btnBack").onclick=()=>setStep(step-1);
+document.getElementById("btnNext").onclick=async()=>{
+  if(step===1){await loadSchedule();await loadBookings();setStep(2)}
+  else if(step===2)setStep(3);
+  else if(step===3){document.getElementById("btnNext").disabled=true;await submitBooking()}
+};
+function boot(){
+  initLiff().catch(()=>{});   // 認人失敗不影響預約
+  loadCourses().then(render).catch(err=>{
+    document.getElementById("view").innerHTML=
+      `<div class="state">讀不到課程表格。<br><br>
+       <span style="font-size:12.5px;color:#C0392B;word-break:break-all">${err.message}</span><br><br>
+       <button onclick="boot()" style="padding:11px 26px;border:1.5px solid var(--navy);background:#fff;color:var(--navy);border-radius:10px;font-size:15px;font-family:inherit">重試</button></div>`;
+  });
+}
+boot();
+</script>
+</body>
+</html>
