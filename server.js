@@ -3,6 +3,21 @@ import express from "express";
 const app = express();
 app.use(express.json());
 
+/* 跨網域授權：預約頁在 github.io，服務在 railway.app */
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+/* 請求日誌：方便在 Railway 看得到每一次呼叫 */
+app.use((req, _res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+  next();
+});
+
 /* ── 環境變數（設在 Railway → Variables）──
    LINE_TOKEN   : LINE Bot 的 Channel access token（Messaging API 分頁最下方）
    FIREBASE_URL : Realtime Database 網址
@@ -121,9 +136,10 @@ app.post("/notify/booking", async (req, res) => {
     await push(uid, [
       { type: "flex", altText: `預約成功：${b.date} ${b.slot}`, contents: bubble },
     ]);
+    console.log("推播成功 →", uid.slice(0, 8) + "...", b.date, b.slot);
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    console.error("推播失敗：", e.message);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
@@ -229,6 +245,23 @@ app.get("/cron/remind", async (req, res) => {
 });
 
 app.get("/", (_, res) => res.send("Otto2 notify service is running."));
+
+/* 自我檢測：確認 token 是否有效 */
+app.get("/health", async (_, res) => {
+  const out = { tokenSet: !!LINE_TOKEN, firebaseSet: !!FIREBASE_URL };
+  if (LINE_TOKEN) {
+    try {
+      const r = await fetch("https://api.line.me/v2/bot/info", {
+        headers: { Authorization: `Bearer ${LINE_TOKEN}` },
+      });
+      out.lineApi = r.status;
+      out.lineOk = r.ok;
+      if (r.ok) { const j = await r.json(); out.botName = j.displayName; }
+      else out.lineError = (await r.text()).slice(0, 200);
+    } catch (e) { out.lineError = e.message; }
+  }
+  res.json(out);
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`otto2-notify on ${PORT}`));
