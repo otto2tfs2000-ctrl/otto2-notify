@@ -109,10 +109,19 @@ app.post("/notify/booking", async (req, res) => {
     if (!uid) return res.json({ ok: false, skip: "無 LINE 身分，略過推播" });
 
     const items = itemLines(b.items);
-    const depText =
-      b.deposit?.method === "points"
-        ? `會員點數預扣 ${b.deposit.amount} 點`
-        : `LINE Pay 訂金 NT$${b.deposit?.amount ?? 600}`;
+    const dep = b.deposit || {};
+    const depName = dep.name || (dep.method === "points" ? "儲值金扣點" : dep.method === "transfer" ? "銀行匯款" : "LINE Pay 訂金");
+    const depText = dep.amount
+      ? `${depName}　${dep.method === "points" ? dep.amount + " 點" : "NT$" + dep.amount}`
+      : depName;
+    const depNote =
+      dep.method === "points"
+        ? "我們將為你預扣點數，小編確認後會再回覆你。"
+        : dep.method === "transfer"
+        ? "請完成匯款後，將帳號末五碼回傳 LINE，小編確認後預約才算保留成功。"
+        : dep.method === "card"
+        ? "訂金於上課當日至櫃檯刷卡，小編會再與你確認。"
+        : "請於今日內完成 LINE Pay 訂金付款並回傳截圖，小編確認後預約才算保留成功。";
 
     const bubble = card({
       tag: "預約成功通知",
@@ -120,16 +129,13 @@ app.post("/notify/booking", async (req, res) => {
       title: "Otto2 ARTCLUB 旗艦館",
       rows: [
         row("日期", dateLabel(b.date), true),
-        row("時段", b.slot, true),
+        row("時段", b.slot2 ? `${b.slot}\n＋ ${b.slot2}` : b.slot, true),
         row("課程", items.join("\n") || "—"),
         row("人數", `${b.people} 位`),
         row("金額", `NT$${(b.total || 0).toLocaleString()}`),
         row("訂金", depText),
       ],
-      notes:
-        b.deposit?.method === "points"
-          ? "我們將為你預扣點數，小編確認後會再回覆你。"
-          : "請於今日內完成 LINE Pay 訂金付款並回傳截圖，小編確認後預約才算保留成功。",
+      notes: depNote,
       footer: "Otto2 ARTCLUB 藝術工作室",
     });
 
