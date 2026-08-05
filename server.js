@@ -535,6 +535,85 @@ app.get("/payment/ping", async (req, res) => {
   }
 });
 
+/* ══════════════════════════════════════════════════════════
+   員工後台登入
+   老師在後台按「用 LINE 登入」→ LINE 給一組一次性的 code →
+   前端把 code 送來這裡 → 這裡拿 Channel secret 去跟 LINE 換身分。
+   Channel secret 只能放在這台伺服器，放前端等於公開。
+
+   環境變數（設在 Railway → Variables）：
+   LOGIN_CHANNEL_ID     : LINE 員工後台頻道的 Channel ID
+   LOGIN_CHANNEL_SECRET : 同頻道的 Channel secret
+   STAFF_DB_URL         : 員工名單所在的資料庫（otto2-2026）
+   ══════════════════════════════════════════════════════════ */
+const LOGIN_ID     = process.env.LOGIN_CHANNEL_ID || "2010980574";
+const LOGIN_SECRET = process.env.LOGIN_CHANNEL_SECRET || "";
+const STAFF_DB     = (process.env.STAFF_DB_URL ||
+  "https://otto2-2026-default-rtdb.asia-southeast1.firebasedatabase.app").replace(/\/$/, "");
+
+app.post("/auth/line", async (req, res) => {
+  try {
+    const { code, redirectUri } = req.body || {};
+    if (!code) return res.status(400).json({ ok: false, error: "缺少 code" });
+    if (!LOGIN_SECRET) return res.status(500).json({ ok: false, error: "伺服器還沒設定 LOGIN_CHANNEL_SECRET" });
+
+    /* 一、拿 code 去跟 LINE 換 access token */
+    const form = new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: redirectUri || "",
+      client_id: LOGIN_ID,
+      client_secret: LOGIN_SECRET,
+    });
+    const tr = await fetch("https://api.line.me/oauth2/v2.1/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form,
+    });
+    const tj = await tr.json();
+    if (!tr.ok) {
+      return res.status(400).json({ ok: false, error: "LINE 換 token 失敗",
+        detail: tj.error_description || tj.error || "" });
+    }
+
+    /* 二、用 access token 讀出這個人的 LINE 身分 */
+    const pr = await fetch("https://api.line.me/v2/profile", {
+      headers: { Authorization: `Bearer ${tj.access_token}` },
+    });
+    const pj = await pr.json();
+    if (!pr.ok || !pj.userId) {
+      return res.status(400).json({ ok: false, error: "讀不到 LINE 個人資料" });
+    }
+
+    /* 三、比對員工名單。名單沒有這個人就是外人，直接擋掉 */
+    let staff = null;
+    try {
+      const sr = await fetch(`${STAFF_DB}/staff/${pj.userId}.json`);
+      if (sr.ok) staff = await sr.json();
+    } catch (e) { /* 讀不到就當作沒有 */ }
+
+    res.json({
+      ok: true,
+      userId: pj.userId,
+      displayName: pj.displayName || "",
+      picture: pj.pictureUrl || "",
+      staff: staff || null,
+      registered: !!(staff && staff.active !== false),
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/* 檢查登入設定有沒有弄好，用瀏覽器打開就能看 */
+app.get("/auth/ping", (_, res) => {
+  res.json({
+    loginChannelId: LOGIN_ID,
+    secretSet: !!LOGIN_SECRET,
+    staffDb: STAFF_DB,
+  });
+});
+
 app.get("/", (_, res) => res.send("Otto2 notify service is running."));
 
 /* 自我檢測：確認 token 是否有效 */
