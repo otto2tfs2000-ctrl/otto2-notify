@@ -553,7 +553,7 @@ const STAFF_DB     = (process.env.STAFF_DB_URL ||
 
 app.post("/auth/line", async (req, res) => {
   try {
-    const { code, redirectUri } = req.body || {};
+    const { code, redirectUri, invite } = req.body || {};
     if (!code) return res.status(400).json({ ok: false, error: "缺少 code" });
     if (!LOGIN_SECRET) return res.status(500).json({ ok: false, error: "伺服器還沒設定 LOGIN_CHANNEL_SECRET" });
 
@@ -591,6 +591,35 @@ app.post("/auth/line", async (req, res) => {
       const sr = await fetch(`${STAFF_DB}/staff/${pj.userId}.json`);
       if (sr.ok) staff = await sr.json();
     } catch (e) { /* 讀不到就當作沒有 */ }
+
+    /* 四、還不在名單裡，但帶了邀請碼 → 兌換一次，建立帳號 */
+    if (!staff && invite) {
+      try {
+        const ir = await fetch(`${STAFF_DB}/staffInvites/${invite}.json`);
+        const iv = ir.ok ? await ir.json() : null;
+        if (iv && !iv.used) {
+          staff = {
+            name: iv.name || pj.displayName || "",
+            role: iv.role || "teacher",
+            tabs: Array.isArray(iv.tabs) ? iv.tabs : [],
+            active: true,
+            addedAt: new Date().toISOString(),
+            addedBy: iv.createdBy || "invite",
+          };
+          await fetch(`${STAFF_DB}/staff/${pj.userId}.json`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(staff),
+          });
+          /* 邀請連結只能用一次，兌換完立刻標記 */
+          await fetch(`${STAFF_DB}/staffInvites/${invite}.json`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ used: true, usedAt: new Date().toISOString(), usedBy: pj.userId }),
+          });
+        }
+      } catch (e) { /* 兌換失敗就當作沒有帳號 */ }
+    }
 
     res.json({
       ok: true,
