@@ -2,7 +2,7 @@ import express from "express";
 import crypto from "crypto";
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
 /* 跨網域授權：預約頁在 github.io，服務在 railway.app */
 app.use((req, res, next) => {
@@ -20,14 +20,16 @@ app.use((req, _res, next) => {
 });
 
 /* ── 環境變數（設在 Railway → Variables）──
-   LINE_TOKEN   : LINE Bot 的 Channel access token（Messaging API 分頁最下方）
-   FIREBASE_URL : Realtime Database 網址
-   CRON_KEY     : 自訂密碼，保護每日提醒不被亂觸發
-   STUDIO_ADDR  : 地址（可省略，有預設值）
-   MAP_URL      : 地圖短網址（可省略）
+   LINE_TOKEN      : LINE Bot 的 Channel access token（Messaging API 分頁最下方）
+   FIREBASE_URL    : Realtime Database 網址（otto2-booking-f9ef7）
+   FIREBASE_SECRET : ★新增★ 上面那本資料庫的「資料庫密鑰」
+   CRON_KEY        : 自訂密碼，保護每日提醒不被亂觸發
+   STUDIO_ADDR     : 地址（可省略，有預設值）
+   MAP_URL         : 地圖短網址（可省略）
 */
 const LINE_TOKEN   = process.env.LINE_TOKEN;
 const FIREBASE_URL = (process.env.FIREBASE_URL || "").replace(/\/$/, "");
+const FIREBASE_SECRET = process.env.FIREBASE_SECRET || "";
 const CRON_KEY     = process.env.CRON_KEY || "otto2";
 const STUDIO_ADDR  = process.env.STUDIO_ADDR || "台中市南屯區干城街328號4樓「Art2plaza親子美學館」內，入內有電梯";
 const MAP_URL      = process.env.MAP_URL || "";
@@ -49,6 +51,36 @@ const LIFF_URL  = process.env.LIFF_URL || "https://liff.line.me/2010906803-FMDYk
 const HOLD_MIN  = Number(process.env.HOLD_MINUTES || 15);
 
 const NAVY = "#1E2B4F", GOLD = "#E3B34C", INK = "#2A2E38", SOFT = "#6B7180";
+
+/* ══════════════════════════════════════════════════════════
+   Firebase 連線（★這一段是這次新增的重點★）
+
+   以前這台伺服器連 Firebase 跟瀏覽器一樣，直接打網址、不帶任何密碼，
+   所以資料庫規則一旦鎖起來，這台伺服器也會跟著讀不到。
+
+   現在改成每一次呼叫都在網址後面掛上 ?auth=資料庫密鑰。
+   帶了密鑰就是管理員身分，規則鎖到什麼程度都讀寫得到。
+   密鑰只存在 Railway 的環境變數裡，不會出現在任何前端檔案。
+   ══════════════════════════════════════════════════════════ */
+
+/* 組出帶密鑰的網址。extra 可以再加 shallow 之類的查詢參數 */
+function dbUrl(base, secret, path, extra = {}) {
+  const u = new URL(`${base}/${path}.json`);
+  if (secret) u.searchParams.set("auth", secret);
+  for (const k of Object.keys(extra)) u.searchParams.set(k, extra[k]);
+  return u.toString();
+}
+
+const fbUrl    = (path, extra) => dbUrl(FIREBASE_URL, FIREBASE_SECRET, path, extra);
+
+/* 預約／會員資料庫的小工具 */
+const fbGet = async (path, extra) => (await fetch(fbUrl(path, extra))).json();
+const fbPatch = (path, data) =>
+  fetch(fbUrl(path), {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
 
 /* ── 共用：推播 ── */
 async function push(to, messages) {
@@ -209,7 +241,7 @@ app.get("/cron/remind", async (req, res) => {
     const p = (n) => String(n).padStart(2, "0");
     const target = `${now.getUTCFullYear()}/${p(now.getUTCMonth() + 1)}/${p(now.getUTCDate())}`;
 
-    const data = await (await fetch(`${FIREBASE_URL}/bookings.json`)).json();
+    const data = await fbGet("bookings");
     const list = Object.entries(data || {})
       .map(([id, v]) => ({ id, ...v }))
       .filter(
@@ -250,11 +282,7 @@ app.get("/cron/remind", async (req, res) => {
 
       try {
         await push(b.line.userId, msgs);
-        await fetch(`${FIREBASE_URL}/bookings/${b.id}.json`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ remindedAt: new Date().toISOString() }),
-        });
+        await fbPatch(`bookings/${b.id}`, { remindedAt: new Date().toISOString() });
         sent++;
       } catch (e) {
         failed.push({ id: b.id, error: e.message });
@@ -270,15 +298,6 @@ app.get("/cron/remind", async (req, res) => {
 /* ══════════════════════════════════════════════════════
    LINE Pay 訂金流程
    ══════════════════════════════════════════════════════ */
-
-/* Firebase 小工具 */
-const fbGet = async (path) => (await fetch(`${FIREBASE_URL}/${path}.json`)).json();
-const fbPatch = (path, data) =>
-  fetch(`${FIREBASE_URL}/${path}.json`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
 
 /* LINE Pay 簽章：HMAC-SHA256(secret + uri + body + nonce)，用 secret 當金鑰 */
 function lpSign(uri, payload, nonce) {
@@ -545,11 +564,82 @@ app.get("/payment/ping", async (req, res) => {
    LOGIN_CHANNEL_ID     : LINE 員工後台頻道的 Channel ID
    LOGIN_CHANNEL_SECRET : 同頻道的 Channel secret
    STAFF_DB_URL         : 員工名單所在的資料庫（otto2-2026）
+   STAFF_SECRET         : ★新增★ 上面那本資料庫的「資料庫密鑰」
+   SESSION_SECRET       : ★新增★ 自己想一組長一點的亂碼，用來簽發登入憑證
    ══════════════════════════════════════════════════════════ */
 const LOGIN_ID     = process.env.LOGIN_CHANNEL_ID || "2010980574";
 const LOGIN_SECRET = process.env.LOGIN_CHANNEL_SECRET || "";
 const STAFF_DB     = (process.env.STAFF_DB_URL ||
   "https://otto2-2026-default-rtdb.asia-southeast1.firebasedatabase.app").replace(/\/$/, "");
+const STAFF_SECRET = process.env.STAFF_SECRET || "";
+const SESSION_SECRET = process.env.SESSION_SECRET || LOGIN_SECRET || "otto2-change-me";
+
+const staffUrl = (path, extra) => dbUrl(STAFF_DB, STAFF_SECRET, path, extra);
+const staffGet = async (path, extra) => (await fetch(staffUrl(path, extra))).json();
+
+/* ── 登入憑證 ──
+   以前前端只存 LINE userId，而 userId 不是秘密（畫面上就看得到），
+   所以拿它跟伺服器要資料等於沒有驗證。
+
+   改成由這台伺服器簽發一張憑證：內容是「誰＋到期時間」，
+   後面接一段用 SESSION_SECRET 算出來的簽章。
+   簽章算不出來就偽造不了，改一個字也會對不起來。          */
+const TOKEN_DAYS = 30;
+
+function signToken(userId, days = TOKEN_DAYS) {
+  const exp = Date.now() + days * 86400000;
+  const body = Buffer.from(`${userId}|${exp}`).toString("base64url");
+  const sig = crypto.createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
+  return `${body}.${sig}`;
+}
+
+/* 比對字串時用固定時間比較，避免從回應快慢反推內容 */
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  if (ba.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ba, bb);
+}
+
+/* 憑證有效就回傳 userId，無效或過期回傳 null */
+function verifyToken(token) {
+  if (!token || typeof token !== "string") return null;
+  const i = token.lastIndexOf(".");
+  if (i < 1) return null;
+  const body = token.slice(0, i);
+  const sig = token.slice(i + 1);
+  const expect = crypto.createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
+  if (!safeEqual(sig, expect)) return null;
+  const parts = Buffer.from(body, "base64url").toString().split("|");
+  const userId = parts[0];
+  const exp = Number(parts[1] || 0);
+  if (!userId || !exp || exp < Date.now()) return null;
+  return userId;
+}
+
+/* 每一支員工專用的 API 都先過這一關：
+   憑證有效、名單裡有這個人、而且沒被停用，三個都成立才放行。
+   管理員把某人停用，對方下一次呼叫就會被擋，不用等憑證過期。 */
+async function requireStaff(req, res) {
+  const token = (req.body && req.body.token) || req.query.token || "";
+  const uid = verifyToken(token);
+  if (!uid) {
+    res.status(401).json({ ok: false, error: "登入已過期，請重新登入" });
+    return null;
+  }
+  let staff = null;
+  try {
+    staff = await staffGet(`staff/${encodeURIComponent(uid)}`);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "讀不到員工名單" });
+    return null;
+  }
+  if (!staff || staff.active === false) {
+    res.status(403).json({ ok: false, error: "這個帳號沒有權限" });
+    return null;
+  }
+  return { uid, staff };
+}
 
 app.post("/auth/line", async (req, res) => {
   try {
@@ -588,15 +678,13 @@ app.post("/auth/line", async (req, res) => {
     /* 三、比對員工名單。名單沒有這個人就是外人，直接擋掉 */
     let staff = null;
     try {
-      const sr = await fetch(`${STAFF_DB}/staff/${pj.userId}.json`);
-      if (sr.ok) staff = await sr.json();
+      staff = await staffGet(`staff/${encodeURIComponent(pj.userId)}`);
     } catch (e) { /* 讀不到就當作沒有 */ }
 
     /* 四、還不在名單裡，但帶了邀請碼 → 兌換一次，建立帳號 */
     if (!staff && invite) {
       try {
-        const ir = await fetch(`${STAFF_DB}/staffInvites/${invite}.json`);
-        const iv = ir.ok ? await ir.json() : null;
+        const iv = await staffGet(`staffInvites/${encodeURIComponent(invite)}`);
         if (iv && !iv.used) {
           staff = {
             name: iv.name || pj.displayName || "",
@@ -606,13 +694,13 @@ app.post("/auth/line", async (req, res) => {
             addedAt: new Date().toISOString(),
             addedBy: iv.createdBy || "invite",
           };
-          await fetch(`${STAFF_DB}/staff/${pj.userId}.json`, {
+          await fetch(staffUrl(`staff/${encodeURIComponent(pj.userId)}`), {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(staff),
           });
           /* 邀請連結只能用一次，兌換完立刻標記 */
-          await fetch(`${STAFF_DB}/staffInvites/${invite}.json`, {
+          await fetch(staffUrl(`staffInvites/${encodeURIComponent(invite)}`), {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ used: true, usedAt: new Date().toISOString(), usedBy: pj.userId }),
@@ -621,15 +709,102 @@ app.post("/auth/line", async (req, res) => {
       } catch (e) { /* 兌換失敗就當作沒有帳號 */ }
     }
 
+    const registered = !!(staff && staff.active !== false);
+
     res.json({
       ok: true,
       userId: pj.userId,
       displayName: pj.displayName || "",
       picture: pj.pictureUrl || "",
       staff: staff || null,
+      registered,
+      /* 只有真的在名單裡才發憑證，外人拿不到 */
+      token: registered ? signToken(pj.userId) : "",
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/* ══ 主畫面 APP 專用登入（?k=userId.金鑰）══
+   以前這段是在瀏覽器裡自己讀 staff/{uid}/appKey 來比對，
+   代表那本資料庫必須開放讀取，任何人都撈得到所有人的金鑰。
+   現在改成把 uid 和金鑰送來這裡，由伺服器比對，前端讀不到 appKey。 */
+app.post("/auth/key", async (req, res) => {
+  try {
+    const { uid, key } = req.body || {};
+    if (!uid || !key) return res.status(400).json({ ok: false, error: "連結格式不對" });
+
+    let staff = null;
+    try {
+      staff = await staffGet(`staff/${encodeURIComponent(uid)}`);
+    } catch (e) { /* 讀不到就當作沒有 */ }
+
+    if (!staff || !staff.appKey || !safeEqual(staff.appKey, key) || staff.active === false) {
+      return res.status(403).json({ ok: false, error: "這條連結已經失效" });
+    }
+
+    res.json({
+      ok: true,
+      userId: uid,
+      displayName: staff.name || "",
+      picture: "",
+      staff,
+      registered: true,
+      token: signToken(uid),
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/* ══ 名單是不是空的（系統剛裝好時要讓第一個人設成管理員）══
+   只回傳一個是非題，不會吐出任何名單內容，所以可以公開。 */
+app.get("/auth/bootstrap", async (_req, res) => {
+  try {
+    const j = await staffGet("staff", { shallow: "true" });
+    res.json({ ok: true, empty: !j || !Object.keys(j).length });
+  } catch (e) {
+    res.json({ ok: false, empty: false, error: e.message });
+  }
+});
+
+/* ══ 重新讀自己的權限（管理員改完設定，對方重整就生效）══ */
+app.post("/staff/me", async (req, res) => {
+  try {
+    const uid = verifyToken((req.body || {}).token);
+    if (!uid) return res.status(401).json({ ok: false, error: "登入已過期，請重新登入" });
+    let staff = null;
+    try {
+      staff = await staffGet(`staff/${encodeURIComponent(uid)}`);
+    } catch (e) { /* 讀不到就當作沒有 */ }
+    res.json({
+      ok: true,
+      userId: uid,
+      staff: staff || null,
       registered: !!(staff && staff.active !== false),
     });
   } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/* ══ 會員清單（員工限定）══
+   以前後台是從瀏覽器直接撈整包 /members，所以那本資料庫必須開放讀取，
+   等於一千四百多位客人的姓名電話任何人都拿得到。
+   改成從這裡拿，先驗憑證再回資料，規則就能鎖起來。
+
+   body: { token, shallow }
+   shallow: true 只回電話清單（判斷是不是舊客人用的，資料量小很多） */
+app.post("/staff/members", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const shallow = !!(req.body || {}).shallow;
+    const data = await fbGet("members", shallow ? { shallow: "true" } : undefined);
+    res.json({ ok: true, shallow, members: data || {} });
+  } catch (e) {
+    console.error("讀會員清單失敗：", e.message);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
@@ -640,6 +815,9 @@ app.get("/auth/ping", (_, res) => {
     loginChannelId: LOGIN_ID,
     secretSet: !!LOGIN_SECRET,
     staffDb: STAFF_DB,
+    staffSecretSet: !!STAFF_SECRET,
+    firebaseSecretSet: !!FIREBASE_SECRET,
+    sessionSecretSet: SESSION_SECRET !== "otto2-change-me",
   });
 });
 
@@ -648,23 +826,29 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
 /* 自我檢測：確認 token 是否有效 */
 app.get("/health", async (_, res) => {
   const out = {
-    tokenSet: !!LINE_TOKEN,
+    lineTokenSet: !!LINE_TOKEN,
     firebaseSet: !!FIREBASE_URL,
-    linePay: { idSet: !!LP_ID, secretSet: !!LP_SECRET, env: LP_ENV, host: LP_HOST },
-    selfUrl: SELF_URL,
-    holdMinutes: HOLD_MIN,
+    firebaseSecretSet: !!FIREBASE_SECRET,
+    staffSecretSet: !!STAFF_SECRET,
+    sessionSecretSet: SESSION_SECRET !== "otto2-change-me",
   };
   if (LINE_TOKEN) {
     try {
       const r = await fetch("https://api.line.me/v2/bot/info", {
         headers: { Authorization: `Bearer ${LINE_TOKEN}` },
       });
-      out.lineApi = r.status;
-      out.lineOk = r.ok;
       if (r.ok) { const j = await r.json(); out.botName = j.displayName; }
-      else out.lineError = (await r.text()).slice(0, 200);
     } catch (e) { out.lineError = e.message; }
   }
+  /* 順便確認密鑰真的連得上資料庫 */
+  try {
+    const r = await fetch(fbUrl("bookings", { shallow: "true", limitToFirst: "1", orderBy: '"$key"' }));
+    out.firebaseReadable = r.ok;
+  } catch (e) { out.firebaseError = e.message; }
+  try {
+    const r = await fetch(staffUrl("staff", { shallow: "true" }));
+    out.staffDbReadable = r.ok;
+  } catch (e) { out.staffDbError = e.message; }
   res.json(out);
 });
 
