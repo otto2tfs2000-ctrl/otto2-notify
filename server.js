@@ -840,10 +840,14 @@ app.get("/health", async (_, res) => {
       if (r.ok) { const j = await r.json(); out.botName = j.displayName; }
     } catch (e) { out.lineError = e.message; }
   }
-  /* 順便確認密鑰真的連得上資料庫 */
+  /* 順便確認密鑰真的連得上資料庫。
+     故意去戳 members（等一下要鎖起來的路徑）：
+     規則鎖上之後還讀得到，就代表密鑰確實有效。
+     注意 shallow 不能跟 orderBy／limitToFirst 併用，會被 Firebase 退回。 */
   try {
-    const r = await fetch(fbUrl("bookings", { shallow: "true", limitToFirst: "1", orderBy: '"$key"' }));
+    const r = await fetch(fbUrl("members", { shallow: "true" }));
     out.firebaseReadable = r.ok;
+    if (!r.ok) out.firebaseError = `HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`;
   } catch (e) { out.firebaseError = e.message; }
   try {
     const r = await fetch(staffUrl("staff", { shallow: "true" }));
