@@ -809,6 +809,84 @@ app.post("/staff/members", async (req, res) => {
   }
 });
 
+/* ══ 只有管理員能過的關卡 ══
+   先過 requireStaff（憑證有效、名單裡有、沒被停用），再檢查身分。 */
+async function requireOwner(req, res) {
+  const s = await requireStaff(req, res);
+  if (!s) return null;
+  if (s.staff.role !== "owner") {
+    res.status(403).json({ ok: false, error: "只有管理員能管理帳號" });
+    return null;
+  }
+  return s;
+}
+
+/* ══ 員工名單（管理員限定）══
+   staff.js 以前直接從瀏覽器讀 /staff 和 /staffInvites，
+   代表 otto2-2026 必須開放讀取。而名單裡存著 appKey——
+   那是「主畫面 APP 專屬連結」的登入密碼，撈走名單就能冒充任何一位員工。
+
+   ★這裡回傳前一定要把 appKey 拔掉★
+   名單搬到伺服器、金鑰卻整包送回瀏覽器的話，等於白做一場。
+   前端只拿得到 hasKey 這個是非題；要實際的連結請走 /staff/applink。
+
+   body: { token } */
+app.post("/staff/list", async (req, res) => {
+  const s = await requireOwner(req, res);
+  if (!s) return;
+  try {
+    const [a, b] = await Promise.all([staffGet("staff"), staffGet("staffInvites")]);
+    const staff = Object.keys(a || {}).map((uid) => {
+      const src = a[uid] && typeof a[uid] === "object" ? a[uid] : {};
+      const v = Object.assign({}, src, { uid, hasKey: !!src.appKey });
+      delete v.appKey;
+      return v;
+    });
+    const invites = Object.keys(b || {})
+      .map((t) => {
+        const src = b[t] && typeof b[t] === "object" ? b[t] : {};
+        return Object.assign({}, src, { token: t });
+      })
+      .filter((i) => !i.used);
+    res.json({ ok: true, staff, invites });
+  } catch (e) {
+    console.error("讀員工名單失敗：", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/* ══ 產生／取回某個人的專屬連結（管理員限定）══
+   金鑰在這裡產生、在這裡存、只回這一個人的，
+   前端從頭到尾拿不到別人的。
+   regen=true 會換一把新的，舊連結立刻失效。
+
+   body: { token, uid, regen } */
+app.post("/staff/applink", async (req, res) => {
+  const s = await requireOwner(req, res);
+  if (!s) return;
+  try {
+    const { uid, regen } = req.body || {};
+    if (!uid) return res.status(400).json({ ok: false, error: "缺少 uid" });
+    const target = await staffGet(`staff/${encodeURIComponent(uid)}`);
+    if (!target) return res.status(404).json({ ok: false, error: "名單裡沒有這個人" });
+
+    let key = regen ? "" : (target.appKey || "");
+    if (!key) {
+      key = crypto.randomBytes(12).toString("hex");
+      const w = await fetch(staffUrl(`staff/${encodeURIComponent(uid)}/appKey`), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(key),
+      });
+      if (!w.ok) return res.status(500).json({ ok: false, error: `金鑰寫入失敗 HTTP ${w.status}` });
+    }
+    res.json({ ok: true, key });
+  } catch (e) {
+    console.error("產生專屬連結失敗：", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 /* 檢查登入設定有沒有弄好，用瀏覽器打開就能看 */
 app.get("/auth/ping", (_, res) => {
   res.json({
@@ -824,8 +902,18 @@ app.get("/auth/ping", (_, res) => {
 app.get("/", (_, res) => res.send("Otto2 notify service is running."));
 
 /* 自我檢測：確認 token 是否有效 */
+/* 部署版本標記。
+   ── 為什麼要有這個 ──
+   /health 原本那幾項舊版就有，全部 true 只證明服務活著，
+   證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
+   health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
+   以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
+const SERVER_VERSION = "2026-08-09-staff-list";
+
 app.get("/health", async (_, res) => {
   const out = {
+    version: SERVER_VERSION,
+    hasStaffList: true,   /* 這個欄位存在，就代表 /staff/list 和 /staff/applink 都在 */
     lineTokenSet: !!LINE_TOKEN,
     firebaseSet: !!FIREBASE_URL,
     firebaseSecretSet: !!FIREBASE_SECRET,
