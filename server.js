@@ -1086,6 +1086,35 @@ app.post("/liff/member", async (req, res) => {
   }
 });
 
+/* 客人自己的最近使用紀錄。
+   明細裡有經手人、單價、匯入批次這些內部欄位，客人不需要也不該看到，
+   這裡只挑時間、類型、增減、說明四樣，其餘一律不吐。
+   body: { phone, limit } */
+app.post("/liff/ledger", async (req, res) => {
+  try {
+    const raw = String((req.body || {}).phone || "").replace(/[^0-9]/g, "");
+    if (!raw) return res.status(400).json({ ok: false, error: "缺少電話" });
+    const phone = raw.replace(/^886/, "0");
+    const limit = Math.min(Number((req.body || {}).limit) || 20, 50);
+
+    const l = await fbGet(`members/${phone}/ledger`);
+    const list = Object.values(l || {})
+      .filter((e) => e && e.at)
+      .sort((a, b) => String(b.at).localeCompare(String(a.at)))
+      .slice(0, limit)
+      .map((e) => ({
+        at: e.at,
+        type: e.type || "",
+        delta: Number(e.delta) || 0,
+        reason: e.reason || "",
+      }));
+    res.json({ ok: true, entries: list });
+  } catch (e) {
+    console.error("/liff/ledger 失敗：", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.get("/auth/ping", (_, res) => {
   res.json({
     loginChannelId: LOGIN_ID,
@@ -1106,7 +1135,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-08-09-liff-read-b";
+const SERVER_VERSION = "2026-08-09-liff-read-c";
 
 app.get("/health", async (_, res) => {
   const out = {
