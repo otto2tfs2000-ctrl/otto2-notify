@@ -199,6 +199,79 @@ app.post("/notify/booking", async (req, res) => {
   }
 });
 
+/* ══ 1.5 方案開通 ══
+   行政在後台幫客人入完方案之後推一張卡片，把「買了什麼、拿到什麼、
+   什麼時候到期、現在還剩多少」一次講完。
+
+   以前是行政自己打字轉述，打錯很難發現——客人拿到的數字跟系統裡的
+   對不起來，等到要用的時候才吵起來。這張卡片的數字直接由賣方案的
+   流程帶過來，跟寫進明細的是同一批，不會有兩套說法。
+
+   欄位都是選填，方案沒有的就不顯示。純點數方案不會冒出「堂數 +0」。 */
+app.post("/notify/plan", async (req, res) => {
+  try {
+    const b = req.body || {};
+    const uid = b.line?.userId;
+    if (!uid) return res.json({ ok: false, skip: "無 LINE 身分，略過推播" });
+
+    const plan = b.plan || {};
+    const add  = b.add || {};
+    const bal  = b.balance || {};
+    const n = (v) => Number(v || 0);
+    const money = (v) => "NT$" + n(v).toLocaleString();
+    const pts = (v) => n(v).toLocaleString() + " 點";
+
+    const rows = [];
+    rows.push(row("方案", plan.name || "—", true));
+    if (n(plan.price)) rows.push(row("金額", money(plan.price) + (plan.pay ? `　${plan.pay}` : "")));
+
+    /* 點數拆開寫。客人看到「+16,600」會想這數字哪來的，
+       拆成基本、創作回饋、入會回饋三行就不用問。 */
+    if (n(add.points))      rows.push(row("基本點數", "＋" + pts(add.points)));
+    if (n(add.bonusPoints)) rows.push(row("創作回饋", "＋" + pts(add.bonusPoints)));
+    if (n(add.giftPoints))  rows.push(row(b.renew ? "續約回饋" : "入會回饋", "＋" + pts(add.giftPoints)));
+    if (n(add.sessions))    rows.push(row("課程堂數", "＋" + n(add.sessions) + " 堂"));
+    if (n(add.voucher))     rows.push(row("表框折價金", "＋" + money(add.voucher)));
+    if (plan.expiry)        rows.push(row("使用期限", plan.expiry + (plan.months ? `（${plan.months} 個月）` : ""), true));
+
+    /* 分隔線之後是「現在手上有多少」。加了多少跟剩多少是兩件事，
+       客人真正在意的是後者。 */
+    const balBits = [];
+    if (bal.points   != null) balBits.push("點數 " + n(bal.points).toLocaleString());
+    if (n(bal.sessions))      balBits.push("堂數 " + n(bal.sessions));
+    if (n(bal.voucher))       balBits.push("折價金 " + money(bal.voucher));
+    if (n(bal.bonus))         balBits.push("紅利 " + n(bal.bonus));
+    if (balBits.length) {
+      rows.push({ type: "separator", margin: "sm" });
+      rows.push(row("目前餘額", balBits.join("\n"), true));
+    }
+
+    const notes = [
+      plan.gift ? `入會好禮：${plan.gift}（請到工作室領取）` : "",
+      plan.expiry ? "期限內未使用完畢的點數與堂數將不予保留，請提早安排課程。" : "",
+      "點數與堂數可於線上預約時折抵，餘額隨時可在預約頁查詢。",
+    ].filter(Boolean).join("\n");
+
+    const bubble = card({
+      tag: b.renew ? "續約完成通知" : "方案開通通知",
+      tagColor: "#C99A3B",
+      title: b.name ? `${b.name}，方案已開通` : "方案已開通",
+      rows,
+      notes,
+      footer: "Otto2 ARTCLUB 藝術工作室",
+    });
+
+    await push(uid, [
+      { type: "flex", altText: `方案開通：${plan.name || ""}`, contents: bubble },
+    ]);
+    console.log("方案推播成功 →", uid.slice(0, 8) + "...", plan.name);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("方案推播失敗：", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 /* ══ 2. 預約取消 ══ */
 app.post("/notify/cancel", async (req, res) => {
   try {
@@ -908,7 +981,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-08-09-staff-list";
+const SERVER_VERSION = "2026-08-09-plan-notify";
 
 app.get("/health", async (_, res) => {
   const out = {
