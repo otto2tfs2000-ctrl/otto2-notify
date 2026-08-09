@@ -1005,6 +1005,12 @@ app.post("/liff/me", async (req, res) => {
     /* 有留電話就順便看會員檔案，堂數點數還有餘額的一樣算有方案 */
     let name = (prof && prof.name) || "";
     let phone = (prof && prof.phone) || "";
+    /* liffProfiles 沒有電話時退回 lineIndex——前端原本是靠這張對照表
+       認人的，少了它，換過裝置的老客人會被當成陌生人。 */
+    if (!phone) {
+      const idx = await fbGet(`lineIndex/${uid}`);
+      if (typeof idx === "string" && /^0\d{8,10}$/.test(idx)) phone = idx;
+    }
     if (phone) {
       const m = await fbGet(`members/${phone}`);
       if (m) {
@@ -1031,14 +1037,20 @@ app.post("/liff/slots", async (req, res) => {
     const out = {};
     for (const k in (all || {})) {
       const b = all[k];
-      if (!b || b.status === "cancelled") continue;
+      if (!b) continue;
+      /* 取消和逾期未付訂金的都不佔位，跟前端原本的判斷一致 */
+      if (b.status === "cancelled" || b.status === "expired") continue;
       const d = String(b.date || "");
       if (!d) continue;
       if (from && d < from) continue;
       if (to && d > to) continue;
-      const sl = String(b.slot || "");
-      if (!out[d]) out[d] = {};
-      out[d][sl] = (out[d][sl] || 0) + (Number(b.people) || 1);
+      /* 連堂課會橫跨兩個時段，第二格一樣要佔名額，
+         漏算的話那個時段會被超收。 */
+      for (const sl of [b.slot, b.slot2]) {
+        if (!sl) continue;
+        if (!out[d]) out[d] = {};
+        out[d][sl] = (out[d][sl] || 0) + (Number(b.people) || 0);
+      }
     }
     res.json({ ok: true, used: out });
   } catch (e) {
@@ -1094,7 +1106,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-08-09-liff-read";
+const SERVER_VERSION = "2026-08-09-liff-read-b";
 
 app.get("/health", async (_, res) => {
   const out = {
