@@ -961,6 +961,119 @@ app.post("/staff/applink", async (req, res) => {
 });
 
 /* 檢查登入設定有沒有弄好，用瀏覽器打開就能看 */
+/* ══════════════════════════════════════════════════════════
+   客人端（LIFF 預約頁）的讀取
+
+   以前預約頁是直接從瀏覽器讀 Firebase 的，其中兩處讀的是
+   整包 /bookings.json——一份包含每一位客人姓名、電話、備註的
+   完整名單，任何人知道資料庫網址就能整包下載。頁面原始碼在
+   公開倉庫裡，網址就寫在裡面。
+
+   而且它要的只是「這個人來過幾次」跟「這個時段還剩幾位」，
+   為了兩個數字把整本資料庫搬給瀏覽器。資料越長越大，
+   一年後每個客人開頁面都要下載全部，慢只是副作用，
+   個資外洩才是真正的問題。
+
+   這三支端點的設計原則跟後台那幾支不一樣：客人端沒有登入，
+   所以只回傳「問的人自己該知道的」，多一個字都不給。
+   ── /liff/slots 只吐人數，不吐是誰約的
+   ── /liff/member 只吐餘額，不吐明細
+   ── /liff/me 要求先知道 userId 才問得到，那串外人拿不到
+
+   這三支上線、前端改完之後，bookings 和 members 的 .read
+   就可以關掉了。
+   ══════════════════════════════════════════════════════════ */
+
+/* 這個 LINE 帳號在我們這裡的狀態：來過幾次、有沒有方案、留過什麼聯絡方式。
+   來訪次數決定體驗價資格，所以要準。
+   body: { userId } */
+app.post("/liff/me", async (req, res) => {
+  try {
+    const uid = String((req.body || {}).userId || "").trim();
+    if (!uid) return res.status(400).json({ ok: false, error: "缺少 userId" });
+
+    const all = await fbGet("bookings");
+    let visits = 0;
+    for (const k in (all || {})) {
+      const b = all[k];
+      if (b && b.line && b.line.userId === uid && b.status !== "cancelled") visits++;
+    }
+
+    const prof = await fbGet(`liffProfiles/${uid}`);
+    let hasPlan = !!(prof && (prof.plan || Number(prof.credits) > 0));
+
+    /* 有留電話就順便看會員檔案，堂數點數還有餘額的一樣算有方案 */
+    let name = (prof && prof.name) || "";
+    let phone = (prof && prof.phone) || "";
+    if (phone) {
+      const m = await fbGet(`members/${phone}`);
+      if (m) {
+        const c = m.cache || {};
+        if (Number(c.points) > 0 || Number(c.sessions) > 0) hasPlan = true;
+        if (!name) name = m.name || "";
+      }
+    }
+
+    res.json({ ok: true, visits, hasPlan, name, phone });
+  } catch (e) {
+    console.error("/liff/me 失敗：", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/* 某段日期內每個時段已經約了幾位。
+   只回傳數字，不回傳任何一位客人的姓名電話。
+   body: { from: "2026/08/10", to: "2026/09/30" } 都可省略，省略就給全部 */
+app.post("/liff/slots", async (req, res) => {
+  try {
+    const { from = "", to = "" } = req.body || {};
+    const all = await fbGet("bookings");
+    const out = {};
+    for (const k in (all || {})) {
+      const b = all[k];
+      if (!b || b.status === "cancelled") continue;
+      const d = String(b.date || "");
+      if (!d) continue;
+      if (from && d < from) continue;
+      if (to && d > to) continue;
+      const sl = String(b.slot || "");
+      if (!out[d]) out[d] = {};
+      out[d][sl] = (out[d][sl] || 0) + (Number(b.people) || 1);
+    }
+    res.json({ ok: true, used: out });
+  } catch (e) {
+    console.error("/liff/slots 失敗：", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/* 用電話查自己的餘額。只吐餘額與姓名，明細一律不給——
+   明細裡有經手人、調整原因這些客人不需要也不該看到的東西。
+   body: { phone } */
+app.post("/liff/member", async (req, res) => {
+  try {
+    const raw = String((req.body || {}).phone || "").replace(/[^0-9]/g, "");
+    if (!raw) return res.status(400).json({ ok: false, error: "缺少電話" });
+    /* +886912345678 這種也要對得起來 */
+    const phone = raw.replace(/^886/, "0");
+    const m = await fbGet(`members/${phone}`);
+    if (!m) return res.json({ ok: true, found: false });
+    const c = m.cache || {};
+    res.json({
+      ok: true, found: true, phone,
+      name: m.name || "",
+      points: Number(c.points) || 0,
+      sessions: Number(c.sessions) || 0,
+      bonus: Number(c.bonus) || 0,
+      voucher: Number(c.voucher) || 0,
+      lineUserId: m.lineUserId || "",
+    });
+  } catch (e) {
+    console.error("/liff/member 失敗：", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.get("/auth/ping", (_, res) => {
   res.json({
     loginChannelId: LOGIN_ID,
@@ -981,11 +1094,12 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-08-09-plan-notify";
+const SERVER_VERSION = "2026-08-09-liff-read";
 
 app.get("/health", async (_, res) => {
   const out = {
     version: SERVER_VERSION,
+    hasLiffRead: true,   /* 這個欄位存在，就代表 /liff/me、/liff/slots、/liff/member 都在 */
     hasStaffList: true,   /* 這個欄位存在，就代表 /staff/list 和 /staff/applink 都在 */
     lineTokenSet: !!LINE_TOKEN,
     firebaseSet: !!FIREBASE_URL,
