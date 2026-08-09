@@ -1115,6 +1115,64 @@ app.post("/liff/ledger", async (req, res) => {
   }
 });
 
+/* ══ 行事曆同步用的預約清單 ══════════════════════════════
+   Google Apps Script 每小時來撈一次，同步進 Google 行事曆。
+
+   這支會吐客人姓名電話，所以跟其他 /cron 一樣用 CRON_KEY 擋住——
+   跟給客人端的 /liff/* 不同，那幾支是公開的、只吐該吐的。
+
+   取消的預約也要回傳（帶 status），行事曆那邊才知道要把已建的
+   活動刪掉。只回傳「還有效的」的話，客人取消了，行事曆上那筆
+   會一直留著，老師照樣去準備。
+
+   GET /cron/bookings?key=xxx&from=2026/08/10&to=2026/09/30
+   不給日期就抓今天起 60 天。 */
+app.get("/cron/bookings", async (req, res) => {
+  try {
+    if (req.query.key !== CRON_KEY) return res.status(403).json({ ok: false });
+
+    const p = (n) => String(n).padStart(2, "0");
+    const tw = new Date(Date.now() + 8 * 3600 * 1000);
+    const fmt = (d) => `${d.getUTCFullYear()}/${p(d.getUTCMonth() + 1)}/${p(d.getUTCDate())}`;
+    const from = String(req.query.from || fmt(tw));
+    const toD = new Date(tw.getTime());
+    toD.setUTCDate(toD.getUTCDate() + 60);
+    const to = String(req.query.to || fmt(toD));
+
+    const all = await fbGet("bookings");
+    const list = [];
+    for (const id in (all || {})) {
+      const b = all[id];
+      if (!b || !b.date) continue;
+      const d = String(b.date);
+      if (d < from || d > to) continue;
+      list.push({
+        id,
+        date: d,
+        slot: b.slot || "",
+        slot2: b.slot2 || "",
+        actualTime: b.actualTime || "",
+        people: Number(b.people) || 0,
+        adults: Number(b.adults) || 0,
+        kids: Number(b.kids) || 0,
+        name: (b.customer && b.customer.name) || "",
+        phone: (b.customer && b.customer.phone) || "",
+        note: (b.customer && b.customer.note) || "",
+        courses: (b.items || []).map((i) =>
+          `${i.name || ""}${i.spec ? "（" + i.spec + "）" : ""}×${i.qty || 1}`).join("、"),
+        source: b.source || "liff",
+        status: b.status || "new",
+        checkedOut: !!b.checkout,
+      });
+    }
+    list.sort((a, b2) => (a.date + a.slot).localeCompare(b2.date + b2.slot));
+    res.json({ ok: true, from, to, total: list.length, bookings: list });
+  } catch (e) {
+    console.error("/cron/bookings 失敗：", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.get("/auth/ping", (_, res) => {
   res.json({
     loginChannelId: LOGIN_ID,
@@ -1135,11 +1193,12 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-08-09-liff-read-c";
+const SERVER_VERSION = "2026-08-10-calendar-feed";
 
 app.get("/health", async (_, res) => {
   const out = {
     version: SERVER_VERSION,
+    hasCalendarFeed: true,   /* 這個欄位存在，就代表 /cron/bookings 在 */
     hasLiffRead: true,   /* 這個欄位存在，就代表 /liff/me、/liff/slots、/liff/member 都在 */
     hasStaffList: true,   /* 這個欄位存在，就代表 /staff/list 和 /staff/applink 都在 */
     lineTokenSet: !!LINE_TOKEN,
