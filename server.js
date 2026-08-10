@@ -1044,12 +1044,16 @@ app.post("/liff/slots", async (req, res) => {
       if (!d) continue;
       if (from && d < from) continue;
       if (to && d > to) continue;
+      /* 佔的位子不一定等於人數。地毯這類課要用到機台和桌面，
+         一組客人不管幾個人都佔 3 個位子；一般課才是一人一位。
+         舊資料沒有 seats 欄位，就退回用人數算，行為跟以前一樣。 */
+      const seats = Number(b.seats) || Number(b.people) || 0;
       /* 連堂課會橫跨兩個時段，第二格一樣要佔名額，
          漏算的話那個時段會被超收。 */
       for (const sl of [b.slot, b.slot2]) {
         if (!sl) continue;
         if (!out[d]) out[d] = {};
-        out[d][sl] = (out[d][sl] || 0) + (Number(b.people) || 0);
+        out[d][sl] = (out[d][sl] || 0) + seats;
       }
     }
     res.json({ ok: true, used: out });
@@ -1153,6 +1157,8 @@ app.get("/cron/bookings", async (req, res) => {
         slot2: b.slot2 || "",
         actualTime: b.actualTime || "",
         people: Number(b.people) || 0,
+        seats: Number(b.seats) || Number(b.people) || 0,
+        hours: Number(b.hours) || 0,
         adults: Number(b.adults) || 0,
         kids: Number(b.kids) || 0,
         name: (b.customer && b.customer.name) || "",
@@ -1193,12 +1199,13 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-08-10-calendar-feed";
+const SERVER_VERSION = "2026-08-10-seats";
 
 app.get("/health", async (_, res) => {
   const out = {
     version: SERVER_VERSION,
     hasCalendarFeed: true,   /* 這個欄位存在，就代表 /cron/bookings 在 */
+    hasSeats: true,          /* 時段名額改以 seats 計算（地毯這類佔位課用得到） */
     hasLiffRead: true,   /* 這個欄位存在，就代表 /liff/me、/liff/slots、/liff/member 都在 */
     hasStaffList: true,   /* 這個欄位存在，就代表 /staff/list 和 /staff/applink 都在 */
     lineTokenSet: !!LINE_TOKEN,
