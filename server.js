@@ -60,6 +60,19 @@ const CAP_PER_TEACHER = 5;   /* 每位老師可帶人數 */
 const SEAT_CAP        = 13;  /* 單一時段人數天花板 */
 /* 沒特別指定的日子，看星期幾抓預設老師數（跟後台、客人端一致） */
 const BK_BASE_WEEK = { 0: 0, 1: 2, 2: 2, 3: 2, 4: 2, 5: 2, 6: 3 };
+/* 手動登記可以打自訂時段（例如 15:00-17:00），算容量時要歸進最接近的
+   那一場，跟後台 booking.js 的 SLOT_BASE 一字不差，不然這種自訂時段
+   會被漏算，明明滿了卻算成沒人。對不到表的就不算進任何一場（跟後台的
+   「其他」分類一樣，不佔任何時段的名額）。 */
+const SLOT_BASE = {
+  "09:30-11:30": "10:00-12:00", "09:30-12:00": "10:00-12:00",
+  "10:00-12:00": "10:00-12:00", "10:30-12:30": "10:00-12:00",
+  "13:30-15:30": "14:00-16:00", "14:00-16:00": "14:00-16:00", "14:30-16:30": "14:00-16:00",
+  "15:00-17:00": "16:00-18:00", "15:30-17:30": "16:00-18:00",
+  "16:00-18:00": "16:00-18:00", "16:30-18:30": "16:00-18:00",
+  "18:30-21:00": "18:30-21:00", "19:00-21:00": "18:30-21:00",
+};
+const bkBase = (sl) => SLOT_BASE[String(sl || "").trim()] || "";
 
 async function gvizSheet(sheetName) {
   const url = `https://docs.google.com/spreadsheets/d/${COURSE_SHEET_ID}/gviz/tq?sheet=${encodeURIComponent(sheetName)}&tqx=out:json`;
@@ -1164,7 +1177,11 @@ app.post("/liff/availability", async (req, res) => {
         : [b.slot, b.slot2].filter(Boolean);
       for (const sl of slotList) {
         if (!sl) continue;
-        used[sl] = (used[sl] || 0) + seats;
+        /* 自訂時段（例如 15:00-17:00）要歸進最接近的那一場才算得準；
+           對不到表的就不算，跟後台「其他」分類一樣不佔任何時段名額 */
+        const base = bkBase(sl) || (BK_SLOTS.includes(sl) || sl === BK_EVE_SLOT ? sl : "");
+        if (!base) continue;
+        used[base] = (used[base] || 0) + seats;
       }
     }
 
