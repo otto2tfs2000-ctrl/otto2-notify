@@ -50,6 +50,79 @@ const SELF_URL  = (process.env.SELF_URL || "https://otto2-notify-production.up.r
 const LIFF_URL  = process.env.LIFF_URL || "https://liff.line.me/2010906803-FMDYktUN";
 const HOLD_MIN  = Number(process.env.HOLD_MINUTES || 15);
 
+/* ── 課程／班表試算表：跟後台、客人端讀同一份 ──
+   這裡只用「班表」分頁算時段容量，給 /liff/availability 用
+   （客服機器人問時段滿了沒，就是打這支）。 */
+const COURSE_SHEET_ID = "1QjiDwmPcwbmdhmNv9cz1A6veC_BbC75m1VJG85P3Q6M";
+const BK_SLOTS   = ["10:00-12:00", "14:00-16:00", "16:00-18:00"];
+const BK_EVE_SLOT = "18:30-21:00";
+const CAP_PER_TEACHER = 5;   /* 每位老師可帶人數 */
+const SEAT_CAP        = 13;  /* 單一時段人數天花板 */
+/* 沒特別指定的日子，看星期幾抓預設老師數（跟後台、客人端一致） */
+const BK_BASE_WEEK = { 0: 0, 1: 2, 2: 2, 3: 2, 4: 2, 5: 2, 6: 3 };
+
+async function gvizSheet(sheetName) {
+  const url = `https://docs.google.com/spreadsheets/d/${COURSE_SHEET_ID}/gviz/tq?sheet=${encodeURIComponent(sheetName)}&tqx=out:json`;
+  const t = await (await fetch(url)).text();
+  const a = t.indexOf("{"), b = t.lastIndexOf("}");
+  const j = JSON.parse(t.substring(a, b + 1));
+  if (!j.table) throw new Error(`找不到工作表「${sheetName}」`);
+  return j.table.rows.map((r) => r.c.map((c) => (c ? (c.f ?? c.v) : "")));
+}
+
+/* 班表：試算表「班表」當底，Firebase /schedule 蓋過去——
+   跟 salary-system/booking.js 的 bkLoadSched 是同一套邏輯，算出來的容量才會跟後台看到的一致。
+   快取 5 分鐘，客服機器人問一次不用每次都重讀試算表。 */
+let scheduleCache = { data: null, ts: 0 };
+const SCHEDULE_TTL = 5 * 60 * 1000;
+async function loadSchedule() {
+  if (scheduleCache.data && Date.now() - scheduleCache.ts < SCHEDULE_TTL) return scheduleCache.data;
+  const m = {};
+  try {
+    const rows = await gvizSheet("班表");
+    if (rows.length && /日期|週/.test(String(rows[0][0]))) rows.shift();
+    rows.forEach((r) => {
+      const d = String(r[0] || "").trim().replace(/-/g, "/");
+      const v = String(r[2] == null ? "" : r[2]).trim();
+      if (d && v !== "") m[d] = Math.max(0, Number(v) || 0);
+    });
+  } catch (e) { console.error("讀班表分頁失敗：", e.message); }
+  try {
+    const j = await fbGet("schedule");
+    if (j) for (const k in j) {
+      const v2 = j[k];
+      if (v2 === null || v2 === undefined || v2 === "") continue;
+      m[String(k).replace(/-/g, "/")] =
+        typeof v2 === "object"
+          ? { t: Math.max(0, Number(v2.t) || 0), ev: Math.max(0, Number(v2.ev) || 0) }
+          : Math.max(0, Number(v2) || 0);
+    }
+  } catch (e) { console.error("讀 Firebase 班表失敗：", e.message); }
+  scheduleCache = { data: m, ts: Date.now() };
+  return m;
+}
+function schedVal(sched, d) {
+  const v = sched[d];
+  if (v == null) return null;
+  if (typeof v === "object") return { t: Math.max(0, Number(v.t) || 0), ev: Math.max(0, Number(v.ev) || 0) };
+  return { t: Math.max(0, Number(v) || 0), ev: 0 };
+}
+function baseTeachersOn(d) {
+  const [y, m, dd] = d.split("/").map(Number);
+  const w = new Date(y, m - 1, dd).getDay();
+  return BK_BASE_WEEK[w] == null ? 1 : BK_BASE_WEEK[w];
+}
+function teachersOn(sched, d) {
+  const v = schedVal(sched, d);
+  return v ? v.t : baseTeachersOn(d);
+}
+function eveOn(sched, d) {
+  const v = schedVal(sched, d);
+  return v ? v.ev : 0;
+}
+function capOf(sched, d) { return Math.min(teachersOn(sched, d) * CAP_PER_TEACHER, SEAT_CAP); }
+function eveCapOf(sched, d) { return Math.min(eveOn(sched, d) * CAP_PER_TEACHER, SEAT_CAP); }
+
 const NAVY = "#1E2B4F", GOLD = "#E3B34C", INK = "#2A2E38", SOFT = "#6B7180";
 
 /* ══════════════════════════════════════════════════════════
@@ -1063,6 +1136,49 @@ app.post("/liff/slots", async (req, res) => {
     res.json({ ok: true, used: out });
   } catch (e) {
     console.error("/liff/slots 失敗：", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/* 某一天每個時段還剩幾位、滿了沒——把「已訂幾位」跟「這天排幾位老師
+   換算出的上限」一次算給你，容量公式跟後台、客人端同一套，不會對不起來。
+   給客服機器人回答「時段還有位子嗎」用，不用再繞去每小時同步一次的
+   Google 行事曆（那份常常漏資料，比不上這裡即時）。
+   body: { date }，格式跟其他端點一致，YYYY/MM/DD */
+app.post("/liff/availability", async (req, res) => {
+  try {
+    const date = String((req.body || {}).date || "").trim();
+    if (!/^\d{4}\/\d{2}\/\d{2}$/.test(date)) {
+      return res.status(400).json({ ok: false, error: "date 格式要 YYYY/MM/DD" });
+    }
+
+    const [all, sched] = await Promise.all([fbGet("bookings"), loadSchedule()]);
+    const used = {};
+    for (const k in (all || {})) {
+      const b = all[k];
+      if (!b || b.status === "cancelled" || b.status === "expired") continue;
+      if (String(b.date || "") !== date) continue;
+      const seats = Number(b.seats) || Number(b.people) || 0;
+      const slotList = (Array.isArray(b.slots) && b.slots.length)
+        ? b.slots.filter(Boolean)
+        : [b.slot, b.slot2].filter(Boolean);
+      for (const sl of slotList) {
+        if (!sl) continue;
+        used[sl] = (used[sl] || 0) + seats;
+      }
+    }
+
+    const eveTeachers = eveOn(sched, date);
+    const slotsToday = eveTeachers > 0 ? [...BK_SLOTS, BK_EVE_SLOT] : [...BK_SLOTS];
+    const slots = slotsToday.map((sl) => {
+      const cap = sl === BK_EVE_SLOT ? eveCapOf(sched, date) : capOf(sched, date);
+      const usedN = used[sl] || 0;
+      return { slot: sl, used: usedN, cap, left: Math.max(0, cap - usedN), full: usedN >= cap };
+    });
+
+    res.json({ ok: true, date, teachers: teachersOn(sched, date), eveTeachers, slots });
+  } catch (e) {
+    console.error("/liff/availability 失敗：", e.message);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
