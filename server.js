@@ -167,6 +167,13 @@ const fbPatch = (path, data) =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
+/* 整個節點覆蓋（給單一值用，例如 lineIndex/{uid} 存的是一支電話字串，不是物件） */
+const fbPut = (path, value) =>
+  fetch(fbUrl(path), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(value),
+  });
 
 /* ── 共用：推播 ── */
 async function push(to, messages) {
@@ -1209,9 +1216,25 @@ app.post("/liff/member", async (req, res) => {
     if (!raw) return res.status(400).json({ ok: false, error: "缺少電話" });
     /* +886912345678 這種也要對得起來 */
     const phone = raw.replace(/^886/, "0");
+    const userId = String((req.body || {}).userId || "").trim();
+
+    /* 客人這支手機、這個 LINE 帳號一對上，就順手記起來，下次同一支手機
+       開頁面才會自動帶出電話。以前是瀏覽器自己直接寫 liffProfiles／lineIndex，
+       但這兩個節點的寫入規則後來鎖起來了，瀏覽器沒有密鑰，每次都被拒絕、
+       又被 .catch 悄悄吞掉，電話永遠記不住也沒人發現。改成伺服器用密鑰寫，
+       不受這個限制——不管這支電話有沒有查到既有會員都要記，第一次來、
+       還沒建檔的客人也一樣，下次才認得出來。 */
+    if (userId && /^0\d{8,10}$/.test(phone)) {
+      fbPut(`liffProfiles/${userId}/phone`, phone).catch(() => {});
+      fbPut(`lineIndex/${userId}`, phone).catch(() => {});
+    }
+
     const m = await fbGet(`members/${phone}`);
     if (!m) return res.json({ ok: true, found: false });
     const c = m.cache || {};
+    if (userId && !m.lineUserId) {
+      fbPatch(`members/${phone}`, { lineUserId: userId }).catch(() => {});
+    }
     res.json({
       ok: true, found: true, phone,
       name: m.name || "",
