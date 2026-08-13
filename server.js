@@ -33,6 +33,9 @@ const FIREBASE_SECRET = process.env.FIREBASE_SECRET || "";
 const CRON_KEY     = process.env.CRON_KEY || "otto2";
 const STUDIO_ADDR  = process.env.STUDIO_ADDR || "台中市南屯區干城街328號4樓「Art2plaza親子美學館」內，入內有電梯";
 const MAP_URL      = process.env.MAP_URL || "";
+/* 預約頁的 AI 小幫手要用的金鑰，跟 line-ai-helper 用同一組 Anthropic 金鑰即可，
+   複製過來當新的環境變數，不用另外申請。 */
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 
 /* ── LINE Pay Online API v3 ──
    LINEPAY_CHANNEL_ID     : LINE Pay 商家後台 → 線上服務 → Channel ID
@@ -135,6 +138,44 @@ function eveOn(sched, d) {
 }
 function capOf(sched, d) { return Math.min(teachersOn(sched, d) * CAP_PER_TEACHER, SEAT_CAP); }
 function eveCapOf(sched, d) { return Math.min(eveOn(sched, d) * CAP_PER_TEACHER, SEAT_CAP); }
+
+/* 課程表快取，給 AI 小幫手組課程清單用。
+   欄位順序跟客人端 rowsToGroups 一模一樣（不可插欄）：
+   分類0／名稱1／說明2／規格3／時長4／價格5／圖片6／上架7／排序8／最小年齡9。
+   快取 5 分鐘，客人聊天來回好幾句不用每句都重讀試算表。 */
+let courseCatalogCache = { data: null, ts: 0 };
+const COURSE_CATALOG_TTL = 5 * 60 * 1000;
+async function loadCourseCatalog() {
+  if (courseCatalogCache.data && Date.now() - courseCatalogCache.ts < COURSE_CATALOG_TTL) return courseCatalogCache.data;
+  const rows = await gvizSheet("課程");
+  const items = rows
+    .map((r) => ({
+      cat: String(r[0] || "").trim(),
+      name: String(r[1] || "").trim(),
+      desc: String(r[2] || "").trim(),
+      spec: String(r[3] || "").trim(),
+      price: String(r[5] ?? "").trim(),
+      on: String(r[7] || "Y").trim().toUpperCase() !== "N",
+      minAge: Number(r[9]) || 0,
+    }))
+    .filter((it) => it.name && it.on);
+  courseCatalogCache = { data: items, ts: Date.now() };
+  return items;
+}
+/* 組成給 AI 看的課程清單文字。同一門課多個規格併成一行，
+   AI 只能從這份清單裡挑課程名稱和規格的原始文字，不可以自己編或翻譯，
+   不然客人端拿這串文字去對 groups 會對不到，整個流程就斷了。 */
+function courseCatalogText(items) {
+  const byKey = new Map();
+  for (const it of items) {
+    const k = it.cat + "|" + it.name;
+    if (!byKey.has(k)) byKey.set(k, { cat: it.cat, name: it.name, desc: it.desc, minAge: it.minAge, specs: [] });
+    byKey.get(k).specs.push(`${it.spec || "單一規格"} $${it.price}`);
+  }
+  return [...byKey.values()]
+    .map((g) => `【${g.cat}】${g.name}${g.minAge ? `（${g.minAge}歲以上）` : ""}：${g.desc}\n  規格與價格：${g.specs.join("、")}`)
+    .join("\n");
+}
 
 const NAVY = "#1E2B4F", GOLD = "#E3B34C", INK = "#2A2E38", SOFT = "#6B7180";
 
@@ -1279,6 +1320,75 @@ app.post("/liff/ledger", async (req, res) => {
   }
 });
 
+/* ══ 預約頁的 AI 小幫手 ══════════════════════════════════
+   跟 line-ai-helper（LINE 官方帳號的客服機器人）是完全獨立的兩套——
+   那支機器人不一定隨時開著，這支直接嵌在預約網頁上，客人點進頁面就在。
+
+   對話收集「幾位、上什麼課、想約哪一天」，收齊、客人也同意送出後，
+   AI 在回覆最後夾帶一段 <<<BOOKING>>>...<<<END>>> 的 JSON，
+   客人端收到後拿去對真正的課程資料、填好精靈的每一步、
+   最後還是走原本「送出預約」那個按鈕，AI 不會替客人按下去。
+
+   body: { message, history:[{role,text}] } */
+app.post("/liff/assistant", async (req, res) => {
+  try {
+    if (!ANTHROPIC_API_KEY) return res.status(500).json({ ok: false, error: "AI 還沒設定金鑰，跟老闆說一聲加 ANTHROPIC_API_KEY" });
+    const message = String((req.body || {}).message || "").trim();
+    if (!message) return res.status(400).json({ ok: false, error: "缺少訊息" });
+    const history = Array.isArray((req.body || {}).history) ? (req.body || {}).history.slice(-12) : [];
+
+    const catalog = await loadCourseCatalog();
+    const today = new Date();
+    const todayStr = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}`;
+
+    const systemPrompt =
+      `你是 Otto2 ARTCLUB 畫室的預約小幫手，用聊天的方式幫客人在網頁上完成預約。今天是 ${todayStr}。\n\n` +
+      `課程清單（只能推薦這裡面真實存在的課程和規格，價格、名稱、規格文字都要照抄，不可以自己編或翻譯）：\n${courseCatalogText(catalog)}\n\n` +
+      `你的任務：\n` +
+      `1. 用輕鬆口語的繁體中文對話，一次通常只問一個問題，不要一次列一堆問題轟炸客人。\n` +
+      `2. 幫客人搞清楚：這次總共幾位大人、幾位小孩、想上哪個課程（可以不只一種課程或人數），想約哪一天，時段（上午／下午／晚上）如果客人主動講就記下來，沒講不用刻意追問。\n` +
+      `3. 資訊收齊之後，先完整覆述一次（哪一天、幾位、上什麼課、大概金額）給客人確認，客人明確答應（例如「對」「好」「可以」「沒問題」）之後，才在這句回覆的最後另起一段，輸出下面這個格式的區塊（這段是給系統看的，不是給客人看的說明文字，客人不會看到）：\n\n` +
+      "<<<BOOKING>>>\n" +
+      `{"adults":1,"kids":0,"date":"2026/08/20","slotPreference":"afternoon","items":[{"courseName":"創作繪畫","spec":"會員價","qty":1}]}\n` +
+      "<<<END>>>\n\n" +
+      `slotPreference 只能填 morning、afternoon、evening、any 其中一個字。courseName 和 spec 必須跟課程清單裡的原始文字完全一致。客人資訊還沒收齊、或客人還沒明確同意送出之前，絕對不要輸出這個區塊——寧可多問一句，也不要在資訊不齊全時就送出。`;
+
+    const messages = [
+      ...history
+        .filter((h) => h && h.role && h.text)
+        .map((h) => ({ role: h.role === "assistant" ? "assistant" : "user", content: String(h.text).slice(0, 2000) })),
+      { role: "user", content: message },
+    ];
+
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 700, system: systemPrompt, messages }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      console.error("/liff/assistant Claude 呼叫失敗：", JSON.stringify(j));
+      return res.status(502).json({ ok: false, error: "AI 暫時連不上，請稍後再試" });
+    }
+    const raw = (j.content || []).map((c) => c.text || "").join("");
+
+    let reply = raw, booking = null;
+    const m = raw.match(/<<<BOOKING>>>([\s\S]*?)<<<END>>>/);
+    if (m) {
+      reply = raw.slice(0, m.index).trim();
+      try { booking = JSON.parse(m[1].trim()); } catch (e) { booking = null; }
+    }
+    res.json({ ok: true, reply, booking });
+  } catch (e) {
+    console.error("/liff/assistant 失敗：", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 /* ══ 行事曆同步用的預約清單 ══════════════════════════════
    Google Apps Script 每小時來撈一次，同步進 Google 行事曆。
 
@@ -1361,7 +1471,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-08-10-multislot";
+const SERVER_VERSION = "2026-08-13-assistant";
 
 app.get("/health", async (_, res) => {
   const out = {
@@ -1370,11 +1480,13 @@ app.get("/health", async (_, res) => {
     hasSeats: true,          /* 時段名額改以 seats 計算（地毯這類佔位課用得到） */
     hasLiffRead: true,   /* 這個欄位存在，就代表 /liff/me、/liff/slots、/liff/member 都在 */
     hasStaffList: true,   /* 這個欄位存在，就代表 /staff/list 和 /staff/applink 都在 */
+    hasAssistant: true,   /* 這個欄位存在，就代表 /liff/assistant（預約頁 AI 小幫手）在 */
     lineTokenSet: !!LINE_TOKEN,
     firebaseSet: !!FIREBASE_URL,
     firebaseSecretSet: !!FIREBASE_SECRET,
     staffSecretSet: !!STAFF_SECRET,
     sessionSecretSet: SESSION_SECRET !== "otto2-change-me",
+    anthropicKeySet: !!ANTHROPIC_API_KEY,
   };
   if (LINE_TOKEN) {
     try {
