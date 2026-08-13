@@ -162,18 +162,47 @@ async function loadCourseCatalog() {
   courseCatalogCache = { data: items, ts: Date.now() };
   return items;
 }
-/* 組成給 AI 看的課程清單文字。同一門課多個規格併成一行，
+/* 加購清單，同一份快取邏輯。欄位：課程名稱0／規格1／加購名稱2／價格3／排序4，
+   跟客人端 SHEET_HEADERS「加購」一模一樣。規格是空的就代表這門課不分規格都能加購。 */
+let addonCatalogCache = { data: null, ts: 0 };
+async function loadAddonCatalog() {
+  if (addonCatalogCache.data && Date.now() - addonCatalogCache.ts < COURSE_CATALOG_TTL) return addonCatalogCache.data;
+  let items = [];
+  try {
+    const rows = await gvizSheet("加購");
+    items = rows
+      .map((r) => ({
+        courseName: String(r[0] || "").trim(),
+        spec: String(r[1] || "").trim(),
+        name: String(r[2] || "").trim(),
+        price: String(r[3] ?? "").trim(),
+      }))
+      .filter((it) => it.courseName && it.name);
+  } catch (e) { console.error("讀加購分頁失敗：", e.message); }
+  addonCatalogCache = { data: items, ts: Date.now() };
+  return items;
+}
+/* 組成給 AI 看的課程清單文字，含加購。同一門課多個規格併成一行，
    AI 只能從這份清單裡挑課程名稱和規格的原始文字，不可以自己編或翻譯，
    不然客人端拿這串文字去對 groups 會對不到，整個流程就斷了。 */
-function courseCatalogText(items) {
+function courseCatalogText(items, addons) {
   const byKey = new Map();
   for (const it of items) {
     const k = it.cat + "|" + it.name;
     if (!byKey.has(k)) byKey.set(k, { cat: it.cat, name: it.name, desc: it.desc, minAge: it.minAge, specs: [] });
     byKey.get(k).specs.push(`${it.spec || "單一規格"} $${it.price}`);
   }
+  const addonsByCourse = new Map();
+  for (const a of addons || []) {
+    if (!addonsByCourse.has(a.courseName)) addonsByCourse.set(a.courseName, []);
+    addonsByCourse.get(a.courseName).push(`${a.name}${a.spec ? `（限${a.spec}）` : ""} +$${a.price}`);
+  }
   return [...byKey.values()]
-    .map((g) => `【${g.cat}】${g.name}${g.minAge ? `（${g.minAge}歲以上）` : ""}：${g.desc}\n  規格與價格：${g.specs.join("、")}`)
+    .map((g) => {
+      const ads = addonsByCourse.get(g.name);
+      return `【${g.cat}】${g.name}${g.minAge ? `（${g.minAge}歲以上）` : ""}：${g.desc}\n  規格與價格：${g.specs.join("、")}` +
+        (ads ? `\n  可加購：${ads.join("、")}` : "");
+    })
     .join("\n");
 }
 
@@ -1337,21 +1366,24 @@ app.post("/liff/assistant", async (req, res) => {
     if (!message) return res.status(400).json({ ok: false, error: "缺少訊息" });
     const history = Array.isArray((req.body || {}).history) ? (req.body || {}).history.slice(-12) : [];
 
-    const catalog = await loadCourseCatalog();
+    const [catalog, addons] = await Promise.all([loadCourseCatalog(), loadAddonCatalog()]);
     const today = new Date();
     const todayStr = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}`;
 
     const systemPrompt =
       `你是 Otto2 ARTCLUB 畫室的預約小幫手，用聊天的方式幫客人在網頁上完成預約。今天是 ${todayStr}。\n\n` +
-      `課程清單（只能推薦這裡面真實存在的課程和規格，價格、名稱、規格文字都要照抄，不可以自己編或翻譯）：\n${courseCatalogText(catalog)}\n\n` +
+      `課程清單（只能推薦這裡面真實存在的課程、規格、加購，價格與文字都要照抄，不可以自己編、猜測或翻譯；` +
+      `清單裡沒寫的資訊，例如某項加購實際能不能用在某個規格上，就老實說不確定，請客人到現場或預約後跟老師確認，不要編答案）：\n` +
+      `${courseCatalogText(catalog, addons)}\n\n` +
       `你的任務：\n` +
       `1. 用輕鬆口語的繁體中文對話，一次通常只問一個問題，不要一次列一堆問題轟炸客人。\n` +
-      `2. 幫客人搞清楚：這次總共幾位大人、幾位小孩、想上哪個課程（可以不只一種課程或人數），想約哪一天，時段（上午／下午／晚上）如果客人主動講就記下來，沒講不用刻意追問。\n` +
-      `3. 資訊收齊之後，先完整覆述一次（哪一天、幾位、上什麼課、大概金額）給客人確認，客人明確答應（例如「對」「好」「可以」「沒問題」）之後，才在這句回覆的最後另起一段，輸出下面這個格式的區塊（這段是給系統看的，不是給客人看的說明文字，客人不會看到）：\n\n` +
+      `2. 幫客人搞清楚：這次總共幾位大人、幾位小孩、想上哪個課程（可以不只一種課程或人數，也可以加購），想約哪一天，時段（上午／下午／晚上）如果客人主動講就記下來，沒講不用刻意追問。\n` +
+      `3. 這個系統跟一般「填表單等專人回電」不一樣：客人選好日期之後，馬上就能看到那一天真正還有空的時段、自己點選——不是登記需求、不是等人工確認、也不需要「專人聯繫」。所以客人問「什麼時候可以約」「還有什麼時段」，正確的回法是「你想約哪一天呢？選好我直接帶你看那天實際還有哪些空位可以選」，绝对不要說「會有專人確認」「幫你登記需求」這類話，這裡講的不是事實。\n` +
+      `4. 資訊收齊之後，先完整覆述一次（哪一天、幾位、上什麼課、有沒有加購、大概金額）給客人確認，客人明確答應（例如「對」「好」「可以」「沒問題」）之後，才在這句回覆的最後另起一段，輸出下面這個格式的區塊（這段是給系統看的，不是給客人看的說明文字，客人不會看到）：\n\n` +
       "<<<BOOKING>>>\n" +
-      `{"adults":1,"kids":0,"date":"2026/08/20","slotPreference":"afternoon","items":[{"courseName":"創作繪畫","spec":"會員價","qty":1}]}\n` +
+      `{"adults":1,"kids":0,"date":"2026/08/20","slotPreference":"afternoon","items":[{"courseName":"創作繪畫","spec":"會員價","qty":1,"addons":["加購名稱"]}]}\n` +
       "<<<END>>>\n\n" +
-      `slotPreference 只能填 morning、afternoon、evening、any 其中一個字。courseName 和 spec 必須跟課程清單裡的原始文字完全一致。客人資訊還沒收齊、或客人還沒明確同意送出之前，絕對不要輸出這個區塊——寧可多問一句，也不要在資訊不齊全時就送出。`;
+      `slotPreference 只能填 morning、afternoon、evening、any 其中一個字。courseName、spec、addons 裡的名稱必須跟課程清單裡的原始文字完全一致，沒有加購就不要放 addons 這個欄位。客人資訊還沒收齊、或客人還沒明確同意送出之前，絕對不要輸出這個區塊——寧可多問一句，也不要在資訊不齊全時就送出。`;
 
     const messages = [
       ...history
@@ -1471,7 +1503,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-08-13-assistant";
+const SERVER_VERSION = "2026-08-14-assistant-addons";
 
 app.get("/health", async (_, res) => {
   const out = {
