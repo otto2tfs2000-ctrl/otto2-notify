@@ -182,6 +182,13 @@ async function loadAddonCatalog() {
   addonCatalogCache = { data: items, ts: Date.now() };
   return items;
 }
+/* 「體驗價／會員價／單次原價」這種不是真的不同商品，只是同一堂課的
+   價格分級——AI 沒辦法確認客人是不是會員，三個一起列出來只會讓人
+   誤用或困惑。這種課程只給 AI 看「非會員會付的那個價格」，其餘規格
+   （像是 A4／A5 這種真的不同尺寸）還是全部列出來讓客人挑。 */
+const PRICE_TIER_WORDS = ["體驗價", "會員價", "單次原價", "原價", "優惠價"];
+const isPriceTierSpec = (s) => PRICE_TIER_WORDS.some((w) => String(s || "").includes(w));
+
 /* 組成給 AI 看的課程清單文字，含加購。同一門課多個規格併成一行，
    AI 只能從這份清單裡挑課程名稱和規格的原始文字，不可以自己編或翻譯，
    不然客人端拿這串文字去對 groups 會對不到，整個流程就斷了。 */
@@ -189,8 +196,8 @@ function courseCatalogText(items, addons) {
   const byKey = new Map();
   for (const it of items) {
     const k = it.cat + "|" + it.name;
-    if (!byKey.has(k)) byKey.set(k, { cat: it.cat, name: it.name, desc: it.desc, minAge: it.minAge, specs: [] });
-    byKey.get(k).specs.push(`${it.spec || "單一規格"} $${it.price}`);
+    if (!byKey.has(k)) byKey.set(k, { cat: it.cat, name: it.name, desc: it.desc, minAge: it.minAge, variants: [] });
+    byKey.get(k).variants.push({ spec: it.spec, price: it.price });
   }
   const addonsByCourse = new Map();
   for (const a of addons || []) {
@@ -199,8 +206,21 @@ function courseCatalogText(items, addons) {
   }
   return [...byKey.values()]
     .map((g) => {
+      const allTier = g.variants.length > 0 && g.variants.every((v) => isPriceTierSpec(v.spec));
+      let specsText;
+      if (allTier) {
+        const orig =
+          g.variants.find((v) => v.spec.includes("單次原價")) ||
+          g.variants.find((v) => v.spec.includes("原價")) ||
+          g.variants.reduce((a, b) => (Number(b.price) > Number(a.price) ? b : a));
+        specsText = `非會員價 $${orig.price}（這是唯一給你的價格，不要主動提會員價或體驗價這些選項——` +
+          `如果之後要輸出 booking JSON，spec 請填「${orig.spec}」；客人是不是會員、能不能用優惠價，` +
+          `交給客人送出預約、填手機那一步由系統自動核對套用，你不用猜也不用問）`;
+      } else {
+        specsText = g.variants.map((v) => `${v.spec || "單一規格"} $${v.price}`).join("、");
+      }
       const ads = addonsByCourse.get(g.name);
-      return `【${g.cat}】${g.name}${g.minAge ? `（${g.minAge}歲以上）` : ""}：${g.desc}\n  規格與價格：${g.specs.join("、")}` +
+      return `【${g.cat}】${g.name}${g.minAge ? `（${g.minAge}歲以上）` : ""}：${g.desc}\n  規格與價格：${specsText}` +
         (ads ? `\n  可加購：${ads.join("、")}` : "");
     })
     .join("\n");
@@ -1379,9 +1399,10 @@ app.post("/liff/assistant", async (req, res) => {
       `1. 用輕鬆口語的繁體中文對話，一次通常只問一個問題，不要一次列一堆問題轟炸客人。\n` +
       `2. 幫客人搞清楚：這次總共幾位大人、幾位小孩、想上哪個課程（可以不只一種課程或人數，也可以加購），想約哪一天，時段（上午／下午／晚上）如果客人主動講就記下來，沒講不用刻意追問。\n` +
       `3. 這個系統跟一般「填表單等專人回電」不一樣：客人選好日期之後，馬上就能看到那一天真正還有空的時段、自己點選——不是登記需求、不是等人工確認、也不需要「專人聯繫」。所以客人問「什麼時候可以約」「還有什麼時段」，正確的回法是「你想約哪一天呢？選好我直接帶你看那天實際還有哪些空位可以選」，绝对不要說「會有專人確認」「幫你登記需求」這類話，這裡講的不是事實。\n` +
-      `4. 資訊收齊之後，先完整覆述一次（哪一天、幾位、上什麼課、有沒有加購、大概金額）給客人確認，客人明確答應（例如「對」「好」「可以」「沒問題」）之後，才在這句回覆的最後另起一段，輸出下面這個格式的區塊（這段是給系統看的，不是給客人看的說明文字，客人不會看到）：\n\n` +
+      `4. 價格只講清單裡給你的那個數字就好，不要自己再分會員價／體驗價／原價這些等級，也不要問客人是不是會員——這件事客人送出預約、填手機時系統會自己核對，不用你來判斷。\n` +
+      `5. 資訊收齊之後，先完整覆述一次（哪一天、幾位、上什麼課、有沒有加購、大概金額）給客人確認，客人明確答應（例如「對」「好」「可以」「沒問題」）之後，才在這句回覆的最後另起一段，輸出下面這個格式的區塊（這段是給系統看的，不是給客人看的說明文字，客人不會看到）：\n\n` +
       "<<<BOOKING>>>\n" +
-      `{"adults":1,"kids":0,"date":"2026/08/20","slotPreference":"afternoon","items":[{"courseName":"創作繪畫","spec":"會員價","qty":1,"addons":["加購名稱"]}]}\n` +
+      `{"adults":1,"kids":0,"date":"2026/08/20","slotPreference":"afternoon","items":[{"courseName":"創作繪畫","spec":"單次原價","qty":1,"addons":["加購名稱"]}]}\n` +
       "<<<END>>>\n\n" +
       `slotPreference 只能填 morning、afternoon、evening、any 其中一個字。courseName、spec、addons 裡的名稱必須跟課程清單裡的原始文字完全一致，沒有加購就不要放 addons 這個欄位。客人資訊還沒收齊、或客人還沒明確同意送出之前，絕對不要輸出這個區塊——寧可多問一句，也不要在資訊不齊全時就送出。`;
 
@@ -1503,7 +1524,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-08-14-assistant-addons";
+const SERVER_VERSION = "2026-08-14-assistant-price";
 
 app.get("/health", async (_, res) => {
   const out = {
