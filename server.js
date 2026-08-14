@@ -182,6 +182,29 @@ async function loadAddonCatalog() {
   addonCatalogCache = { data: items, ts: Date.now() };
   return items;
 }
+
+/* 給 AI 看的公休日提示。之前發生過 AI 沒查真正的班表，
+   直接答應客人約在公休的星期日——因為它完全不知道哪幾天沒開課。
+   規則本身（預設週日公休）加上近期班表的例外（例如某週日有開、
+   或平日臨時公休），一起整理成一段話餵給它，它才不會亂答應日期。
+   最終有沒有位置還是要看 /liff/availability 那邊算出來的真實名額，
+   這段只是讓 AI 在對話階段就不要建議或答應明顯不開課的日子。 */
+async function closedDaysNote(days = 30) {
+  const sched = await loadSchedule();
+  const exceptions = [];
+  const now = new Date();
+  for (let i = 0; i < days; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i);
+    const ds = `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`;
+    const t = teachersOn(sched, ds);
+    const isSun = d.getDay() === 0;
+    if (isSun && t > 0) exceptions.push(`${ds}（${WD[d.getDay()]}）例外有開課`);
+    if (!isSun && t === 0) exceptions.push(`${ds}（${WD[d.getDay()]}）臨時公休`);
+  }
+  return `預設每週日公休，其餘平日和週六都有開課。` +
+    (exceptions.length ? `近期例外（以這份為準）：${exceptions.join("、")}。` : "近期沒有例外。") +
+    `絕對不要建議或答應公休日；不確定某天算不算公休，就用「這天要不要開課我不確定，選好之後直接帶你看實際空位，那邊會準確顯示」帶過，不要自己猜。`;
+}
 /* 「體驗價／會員價／單次原價」這種不是真的不同商品，只是同一堂課的
    價格分級——AI 沒辦法確認客人是不是會員，三個一起列出來只會讓人
    誤用或困惑。這種課程只給 AI 看「非會員會付的那個價格」，其餘規格
@@ -1386,7 +1409,7 @@ app.post("/liff/assistant", async (req, res) => {
     if (!message) return res.status(400).json({ ok: false, error: "缺少訊息" });
     const history = Array.isArray((req.body || {}).history) ? (req.body || {}).history.slice(-12) : [];
 
-    const [catalog, addons] = await Promise.all([loadCourseCatalog(), loadAddonCatalog()]);
+    const [catalog, addons, closedNote] = await Promise.all([loadCourseCatalog(), loadAddonCatalog(), closedDaysNote()]);
     const today = new Date();
     const todayStr = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}`;
 
@@ -1395,11 +1418,12 @@ app.post("/liff/assistant", async (req, res) => {
       `課程清單（只能推薦這裡面真實存在的課程、規格、加購，價格與文字都要照抄，不可以自己編、猜測或翻譯；` +
       `清單裡沒寫的資訊，例如某項加購實際能不能用在某個規格上，就老實說不確定，請客人到現場或預約後跟老師確認，不要編答案）：\n` +
       `${courseCatalogText(catalog, addons)}\n\n` +
+      `開課日期：${closedNote}\n\n` +
       `你的任務：\n` +
       `1. 用輕鬆口語的繁體中文對話，一次通常只問一個問題，不要一次列一堆問題轟炸客人。\n` +
-      `2. 幫客人搞清楚：這次總共幾位大人、幾位小孩、想上哪個課程（可以不只一種課程或人數，也可以加購），想約哪一天，時段（上午／下午／晚上）如果客人主動講就記下來，沒講不用刻意追問。\n` +
+      `2. 幫客人搞清楚：這次總共幾位大人、幾位小孩、想上哪個課程（可以不只一種課程或人數，也可以加購），想約哪一天，時段（上午／下午／晚上）如果客人主動講就記下來，沒講不用刻意追問。問課程規格、尺寸這類問題時，只問「想要哪一種」，不要順便把價格也講出來。\n` +
       `3. 這個系統跟一般「填表單等專人回電」不一樣：客人選好日期之後，馬上就能看到那一天真正還有空的時段、自己點選——不是登記需求、不是等人工確認、也不需要「專人聯繫」。所以客人問「什麼時候可以約」「還有什麼時段」，正確的回法是「你想約哪一天呢？選好我直接帶你看那天實際還有哪些空位可以選」，绝对不要說「會有專人確認」「幫你登記需求」這類話，這裡講的不是事實。\n` +
-      `4. 價格只講清單裡給你的那個數字就好，不要自己再分會員價／體驗價／原價這些等級，也不要問客人是不是會員——這件事客人送出預約、填手機時系統會自己核對，不用你來判斷。\n` +
+      `4. 價格是敏感資訊，客人沒有主動問「多少錢」「費用」之類的問題之前，絕對不要自己提金額——連在問規格、確認課程、聊加購的時候都不要順便帶到價格。只有客人明確問價錢，或是第 5 點要做最後總結確認時，才可以講金額，而且只講清單裡給你的那個數字就好，不要自己再分會員價／體驗價／原價這些等級，也不要問客人是不是會員——這件事客人送出預約、填手機時系統會自己核對，不用你來判斷。\n` +
       `5. 資訊收齊之後，先完整覆述一次（哪一天、幾位、上什麼課、有沒有加購、大概金額）給客人確認，客人明確答應（例如「對」「好」「可以」「沒問題」）之後，才在這句回覆的最後另起一段，輸出下面這個格式的區塊（這段是給系統看的，不是給客人看的說明文字，客人不會看到）：\n\n` +
       "<<<BOOKING>>>\n" +
       `{"adults":1,"kids":0,"date":"2026/08/20","slotPreference":"afternoon","items":[{"courseName":"創作繪畫","spec":"單次原價","qty":1,"addons":["加購名稱"]}]}\n` +
@@ -1524,7 +1548,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-08-14-assistant-price";
+const SERVER_VERSION = "2026-08-14-assistant-schedule";
 
 app.get("/health", async (_, res) => {
   const out = {
