@@ -1217,6 +1217,22 @@ app.post("/liff/me", async (req, res) => {
       const idx = await fbGet(`lineIndex/${uid}`);
       if (typeof idx === "string" && /^0\d{8,10}$/.test(idx)) phone = idx;
     }
+    /* liffProfiles、lineIndex 都沒有的話，回頭從 members 反查
+       誰的 lineUserId 是這個人——老客人是後台手動綁的，只有正向連結，
+       沒有這段會一直被當陌生人、每次都要重新輸入電話。
+       順便把反向連結補回去，下次就不用再查一次全部會員。 */
+    if (!phone) {
+      const mem = await fbGet("members");
+      for (const p in (mem || {})) {
+        if (mem[p] && mem[p].lineUserId === uid) {
+          phone = p;
+          name = name || mem[p].name || "";
+          fbPut(`lineIndex/${uid}`, phone);
+          fbPatch(`liffProfiles/${uid}`, { phone, name });
+          break;
+        }
+      }
+    }
     if (phone) {
       const m = await fbGet(`members/${phone}`);
       if (m) {
@@ -1548,7 +1564,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-08-14-assistant-schedule";
+const SERVER_VERSION = "2026-08-15-liffme-fallback";
 
 app.get("/health", async (_, res) => {
   const out = {
