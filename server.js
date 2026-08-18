@@ -1419,6 +1419,116 @@ app.post("/liff/ledger", async (req, res) => {
   }
 });
 
+/* ══ 客人自己查詢／取消預約（2026-08-18）══════════════════
+   以前客人完全看不到自己約了哪天哪個時段，想改想取消只能私訊小編，
+   小編也常常忘了通知客人異動。這裡只開「查自己的」「取消自己的」，
+   不開「改時段」——改時段直接請客人取消這筆、用「我要預約課程」
+   重新走一次完整精靈，名額檢查、佔位、連堂這些邏輯才不用另外複製一份。 */
+
+/* 今天的日期字串（台灣時區），跟 /cron/remind 用同一個算法 */
+function todayStr() {
+  const t = new Date(Date.now() + 8 * 3600 * 1000);
+  return `${t.getUTCFullYear()}/${String(t.getUTCMonth() + 1).padStart(2, "0")}/${String(t.getUTCDate()).padStart(2, "0")}`;
+}
+function normPhone(raw) {
+  const d = String(raw || "").replace(/[^0-9]/g, "");
+  return d.replace(/^886/, "0");
+}
+/* 這支電話／這個 LINE 帳號是不是這筆預約真正的主人，兩條路都比對，
+   有一條符合就算數——手動登記可能只留電話、客人自己約的兩個都有 */
+function ownsBooking(b, phone, userId) {
+  if (userId && b.line && b.line.userId && b.line.userId === userId) return true;
+  if (phone) {
+    const bp = normPhone((b.customer && b.customer.phone) || b.memberPhone || "");
+    if (bp && bp === phone) return true;
+  }
+  return false;
+}
+
+/* 查自己的預約清單。只回顯示需要的欄位，不把 customer/memberPhone
+   等其他欄位整包丟出去——這支電話底下可能不只一筆，但終究只有他自己看得到。
+   body: { phone, userId? } */
+app.post("/liff/mybookings", async (req, res) => {
+  try {
+    const phone = normPhone((req.body || {}).phone);
+    const userId = String((req.body || {}).userId || "").trim();
+    if (!phone && !userId) return res.status(400).json({ ok: false, error: "缺少電話或 LINE 身分" });
+
+    const today = todayStr();
+    const from = todayStr(); // 過去的不用列，客人查也改不了
+    const all = await fbGet("bookings");
+    const list = Object.entries(all || {})
+      .map(([id, b]) => ({ id, ...b }))
+      .filter((b) => b && b.date && ownsBooking(b, phone, userId) && b.status !== "expired")
+      .filter((b) => b.date >= from)
+      .sort((a, b) => a.date.localeCompare(b.date) || String(a.slot).localeCompare(String(b.slot)))
+      .map((b) => ({
+        id: b.id,
+        date: b.date,
+        dateLabel: dateLabel(b.date),
+        slot: b.actualTime || b.slot || "",
+        items: itemLines(b.items),
+        people: b.people || 0,
+        status: b.status === "cancelled" ? "cancelled" : "active",
+        canCancel: b.status !== "cancelled" && !b.checkout && b.date > today,
+      }));
+    res.json({ ok: true, bookings: list });
+  } catch (e) {
+    console.error("/liff/mybookings 失敗：", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/* 客人自己取消。防呆順序照抄後台 bkCancel 的邏輯：
+   核銷過的不給取消（怕點數/材料已經扣了）、當天的不給線上取消
+   （跟首頁「當日課程無法線上預約」是同一個規則，太臨時要請客人直接聯繫），
+   一定要驗證身分才能動別人的預約。
+   body: { phone, userId?, bookingId, reason? } */
+app.post("/liff/cancelBooking", async (req, res) => {
+  try {
+    const phone = normPhone((req.body || {}).phone);
+    const userId = String((req.body || {}).userId || "").trim();
+    const bookingId = String((req.body || {}).bookingId || "").trim();
+    const reason = String((req.body || {}).reason || "").trim();
+    if (!bookingId) return res.status(400).json({ ok: false, error: "缺少預約編號" });
+    if (!phone && !userId) return res.status(400).json({ ok: false, error: "缺少電話或 LINE 身分" });
+
+    const b = await fbGet(`bookings/${bookingId}`);
+    if (!b) return res.status(404).json({ ok: false, error: "找不到這筆預約" });
+    if (!ownsBooking(b, phone, userId)) return res.status(403).json({ ok: false, error: "這筆不是你的預約" });
+    if (b.status === "cancelled") return res.json({ ok: true, already: true });
+    if (b.checkout) return res.status(400).json({ ok: false, error: "這筆已經核銷過了，請直接私訊小編處理" });
+    const today = todayStr();
+    if (b.date <= today) return res.status(400).json({ ok: false, error: "當天的預約無法線上取消，請直接私訊小編" });
+
+    const now = new Date().toISOString();
+    await fbPatch(`bookings/${bookingId}`, {
+      status: "cancelled",
+      cancelledAt: now,
+      cancelReason: reason || "客人自行取消",
+      cancelledBy: "customer",
+    });
+
+    if (b.line && b.line.userId) {
+      const bubble = card({
+        tag: "取消成功", tagColor: SOFT, title: "這筆預約已經幫你取消",
+        rows: [
+          row("日期", dateLabel(b.date), true),
+          row("時段", b.actualTime || b.slot, true),
+          row("課程", itemLines(b.items).join("\n") || "—"),
+        ],
+        notes: "如果是改時段，歡迎點選圖文選單的「線上預約」重新約一次。",
+        footer: "Otto2 ARTCLUB 藝術工作室",
+      });
+      push(b.line.userId, [{ type: "flex", altText: "預約取消成功", contents: bubble }]).catch(() => {});
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("/liff/cancelBooking 失敗：", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 /* ══ 預約頁的 AI 小幫手 ══════════════════════════════════
    跟 line-ai-helper（LINE 官方帳號的客服機器人）是完全獨立的兩套——
    那支機器人不一定隨時開著，這支直接嵌在預約網頁上，客人點進頁面就在。
@@ -1575,7 +1685,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-08-17-ampm-teachers";
+const SERVER_VERSION = "2026-08-18-mybookings";
 
 app.get("/health", async (_, res) => {
   const out = {
