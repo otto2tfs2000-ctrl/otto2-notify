@@ -110,33 +110,44 @@ async function loadSchedule() {
       if (v2 === null || v2 === undefined || v2 === "") continue;
       m[String(k).replace(/-/g, "/")] =
         typeof v2 === "object"
-          ? { t: Math.max(0, Number(v2.t) || 0), ev: Math.max(0, Number(v2.ev) || 0) }
+          ? { t: Math.max(0, Number(v2.t) || 0), tPM: v2.tPM, ev: Math.max(0, Number(v2.ev) || 0) }
           : Math.max(0, Number(v2) || 0);
     }
   } catch (e) { console.error("讀 Firebase 班表失敗：", e.message); }
   scheduleCache = { data: m, ts: Date.now() };
   return m;
 }
+/* tPM（下午老師數）2026-08-17 新增，跟 salary-system/booking.js 的
+   bkSchedVal 一字不差——舊資料沒有 tPM 就沿用 t，維持舊行為。 */
 function schedVal(sched, d) {
   const v = sched[d];
   if (v == null) return null;
-  if (typeof v === "object") return { t: Math.max(0, Number(v.t) || 0), ev: Math.max(0, Number(v.ev) || 0) };
-  return { t: Math.max(0, Number(v) || 0), ev: 0 };
+  if (typeof v === "object") return {
+    t: Math.max(0, Number(v.t) || 0),
+    tPM: (v.tPM == null ? Math.max(0, Number(v.t) || 0) : Math.max(0, Number(v.tPM) || 0)),
+    ev: Math.max(0, Number(v.ev) || 0),
+  };
+  return { t: Math.max(0, Number(v) || 0), tPM: Math.max(0, Number(v) || 0), ev: 0 };
 }
 function baseTeachersOn(d) {
   const [y, m, dd] = d.split("/").map(Number);
   const w = new Date(y, m - 1, dd).getDay();
   return BK_BASE_WEEK[w] == null ? 1 : BK_BASE_WEEK[w];
 }
-function teachersOn(sched, d) {
+function teachersOn(sched, d) { /* 上午 */
   const v = schedVal(sched, d);
   return v ? v.t : baseTeachersOn(d);
+}
+function teachersOnPM(sched, d) { /* 下午 */
+  const v = schedVal(sched, d);
+  return v ? v.tPM : baseTeachersOn(d);
 }
 function eveOn(sched, d) {
   const v = schedVal(sched, d);
   return v ? v.ev : 0;
 }
 function capOf(sched, d) { return Math.min(teachersOn(sched, d) * CAP_PER_TEACHER, SEAT_CAP); }
+function capOfPM(sched, d) { return Math.min(teachersOnPM(sched, d) * CAP_PER_TEACHER, SEAT_CAP); }
 function eveCapOf(sched, d) { return Math.min(eveOn(sched, d) * CAP_PER_TEACHER, SEAT_CAP); }
 
 /* 課程表快取，給 AI 小幫手組課程清單用。
@@ -196,10 +207,10 @@ async function closedDaysNote(days = 30) {
   for (let i = 0; i < days; i++) {
     const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i);
     const ds = `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`;
-    const t = teachersOn(sched, ds);
+    const t = teachersOn(sched, ds), tPM = teachersOnPM(sched, ds);
     const isSun = d.getDay() === 0;
-    if (isSun && t > 0) exceptions.push(`${ds}（${WD[d.getDay()]}）例外有開課`);
-    if (!isSun && t === 0) exceptions.push(`${ds}（${WD[d.getDay()]}）臨時公休`);
+    if (isSun && (t > 0 || tPM > 0)) exceptions.push(`${ds}（${WD[d.getDay()]}）例外有開課`);
+    if (!isSun && t === 0 && tPM === 0) exceptions.push(`${ds}（${WD[d.getDay()]}）臨時公休`);
   }
   return `預設每週日公休，其餘平日和週六都有開課。` +
     (exceptions.length ? `近期例外（以這份為準）：${exceptions.join("、")}。` : "近期沒有例外。") +
@@ -1324,12 +1335,12 @@ app.post("/liff/availability", async (req, res) => {
     const eveTeachers = eveOn(sched, date);
     const slotsToday = eveTeachers > 0 ? [...BK_SLOTS, BK_EVE_SLOT] : [...BK_SLOTS];
     const slots = slotsToday.map((sl) => {
-      const cap = sl === BK_EVE_SLOT ? eveCapOf(sched, date) : capOf(sched, date);
+      const cap = sl === BK_EVE_SLOT ? eveCapOf(sched, date) : (sl === "10:00-12:00" ? capOf(sched, date) : capOfPM(sched, date));
       const usedN = used[sl] || 0;
       return { slot: sl, used: usedN, cap, left: Math.max(0, cap - usedN), full: usedN >= cap };
     });
 
-    res.json({ ok: true, date, teachers: teachersOn(sched, date), eveTeachers, slots });
+    res.json({ ok: true, date, teachers: teachersOn(sched, date), teachersPM: teachersOnPM(sched, date), eveTeachers, slots });
   } catch (e) {
     console.error("/liff/availability 失敗：", e.message);
     res.status(500).json({ ok: false, error: e.message });
@@ -1564,7 +1575,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-08-15-liffme-fallback";
+const SERVER_VERSION = "2026-08-17-ampm-teachers";
 
 app.get("/health", async (_, res) => {
   const out = {
