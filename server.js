@@ -110,7 +110,13 @@ async function loadSchedule() {
       if (v2 === null || v2 === undefined || v2 === "") continue;
       m[String(k).replace(/-/g, "/")] =
         typeof v2 === "object"
-          ? { t: Math.max(0, Number(v2.t) || 0), tPM: v2.tPM, ev: Math.max(0, Number(v2.ev) || 0) }
+          ? {
+              t: Math.max(0, Number(v2.t) || 0), tPM: v2.tPM, ev: Math.max(0, Number(v2.ev) || 0),
+              capAM: v2.capAM != null ? Math.max(0, Number(v2.capAM) || 0) : null,
+              capPM: v2.capPM != null ? Math.max(0, Number(v2.capPM) || 0) : null,
+              capPM2: v2.capPM2 != null ? Math.max(0, Number(v2.capPM2) || 0) : null,
+              capEve: v2.capEve != null ? Math.max(0, Number(v2.capEve) || 0) : null,
+            }
           : Math.max(0, Number(v2) || 0);
     }
   } catch (e) { console.error("讀 Firebase 班表失敗：", e.message); }
@@ -126,8 +132,12 @@ function schedVal(sched, d) {
     t: Math.max(0, Number(v.t) || 0),
     tPM: (v.tPM == null ? Math.max(0, Number(v.t) || 0) : Math.max(0, Number(v.tPM) || 0)),
     ev: Math.max(0, Number(v.ev) || 0),
+    capAM: v.capAM != null ? Math.max(0, Number(v.capAM) || 0) : null,
+    capPM: v.capPM != null ? Math.max(0, Number(v.capPM) || 0) : null,
+    capPM2: v.capPM2 != null ? Math.max(0, Number(v.capPM2) || 0) : null,
+    capEve: v.capEve != null ? Math.max(0, Number(v.capEve) || 0) : null,
   };
-  return { t: Math.max(0, Number(v) || 0), tPM: Math.max(0, Number(v) || 0), ev: 0 };
+  return { t: Math.max(0, Number(v) || 0), tPM: Math.max(0, Number(v) || 0), ev: 0, capAM: null, capPM: null, capPM2: null, capEve: null };
 }
 function baseTeachersOn(d) {
   const [y, m, dd] = d.split("/").map(Number);
@@ -146,9 +156,19 @@ function eveOn(sched, d) {
   const v = schedVal(sched, d);
   return v ? v.ev : 0;
 }
-function capOf(sched, d) { return Math.min(teachersOn(sched, d) * CAP_PER_TEACHER, SEAT_CAP); }
-function capOfPM(sched, d) { return Math.min(teachersOnPM(sched, d) * CAP_PER_TEACHER, SEAT_CAP); }
-function eveCapOf(sched, d) { return Math.min(eveOn(sched, d) * CAP_PER_TEACHER, SEAT_CAP); }
+function rawCapOf(sched, d) { return Math.min(teachersOn(sched, d) * CAP_PER_TEACHER, SEAT_CAP); }
+function rawCapOfPM(sched, d) { return Math.min(teachersOnPM(sched, d) * CAP_PER_TEACHER, SEAT_CAP); }
+function rawEveCapOf(sched, d) { return Math.min(eveOn(sched, d) * CAP_PER_TEACHER, SEAT_CAP); }
+/* 後台可以幫某個時段手動降上限（位子還夠，但那個時段先不排更多人進來），
+   跟老師排班算出來的上限取較小值——跟 salary-system/booking.js 的 bkCapOf 系列、
+   otto2artclub-booking/index.html 的 capOf 系列一字不差，這三個檔案的容量公式
+   要一起改，漏一個地方客人/AI看到的名額就會跟後台對不起來。
+   14:00-16:00 用 capPM，16:00-18:00 用 capPM2，各自獨立；老師排班的天花板
+   （rawCapOfPM）還是共用同一批下午老師算出來的。 */
+function capOf(sched, d) { const v = schedVal(sched, d), b = rawCapOf(sched, d); return (v && v.capAM != null) ? Math.min(b, v.capAM) : b; }
+function capOfPM(sched, d) { const v = schedVal(sched, d), b = rawCapOfPM(sched, d); return (v && v.capPM != null) ? Math.min(b, v.capPM) : b; }
+function capOfPM2(sched, d) { const v = schedVal(sched, d), b = rawCapOfPM(sched, d); return (v && v.capPM2 != null) ? Math.min(b, v.capPM2) : b; }
+function eveCapOf(sched, d) { const v = schedVal(sched, d), b = rawEveCapOf(sched, d); return (v && v.capEve != null) ? Math.min(b, v.capEve) : b; }
 
 /* 課程表快取，給 AI 小幫手組課程清單用。
    欄位順序跟客人端 rowsToGroups 一模一樣（不可插欄）：
@@ -1335,7 +1355,7 @@ app.post("/liff/availability", async (req, res) => {
     const eveTeachers = eveOn(sched, date);
     const slotsToday = eveTeachers > 0 ? [...BK_SLOTS, BK_EVE_SLOT] : [...BK_SLOTS];
     const slots = slotsToday.map((sl) => {
-      const cap = sl === BK_EVE_SLOT ? eveCapOf(sched, date) : (sl === "10:00-12:00" ? capOf(sched, date) : capOfPM(sched, date));
+      const cap = sl === BK_EVE_SLOT ? eveCapOf(sched, date) : (sl === "10:00-12:00" ? capOf(sched, date) : (sl === "16:00-18:00" ? capOfPM2(sched, date) : capOfPM(sched, date)));
       const usedN = used[sl] || 0;
       return { slot: sl, used: usedN, cap, left: Math.max(0, cap - usedN), full: usedN >= cap };
     });
@@ -1685,7 +1705,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-08-18-mybookings";
+const SERVER_VERSION = "2026-08-27-slotcap-split";
 
 app.get("/health", async (_, res) => {
   const out = {
