@@ -545,9 +545,16 @@ app.get("/cron/remind", async (req, res) => {
   try {
     if (req.query.key !== CRON_KEY) return res.status(403).json({ ok: false });
 
-    // 以台灣時間算「明天」
+    const notifySettings = (await fbGet("settings/notify").catch(() => null)) || {};
+    const reminderCfg = notifySettings.reminder || {};
+    if (reminderCfg.enabled === false) {
+      return res.json({ ok: true, skip: "預約提醒目前已停用" });
+    }
+    const daysBefore = Number.isFinite(reminderCfg.daysBefore) ? reminderCfg.daysBefore : 1;
+
+    // 以台灣時間算「N 天後」
     const now = new Date(Date.now() + 8 * 3600 * 1000);
-    now.setUTCDate(now.getUTCDate() + 1);
+    now.setUTCDate(now.getUTCDate() + daysBefore);
     const p = (n) => String(n).padStart(2, "0");
     const target = `${now.getUTCFullYear()}/${p(now.getUTCMonth() + 1)}/${p(now.getUTCDate())}`;
 
@@ -601,6 +608,138 @@ app.get("/cron/remind", async (req, res) => {
     res.json({ ok: true, target, total: list.length, sent, failed });
   } catch (e) {
     console.error(e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/* ══ 訂單逾時提醒 ══
+   訂金掛著沒付、又還沒被 /cron/release 釋放掉的訂單，主動推一次提醒，
+   給客人一個機會在真的被釋放前補款。跟 /cron/remind 同一套「設定開關 +
+   已發過就不再發」的邏輯，只是這裡看的是 booking.ts（下單時間，跟
+   /cron/release 用的是同一個欄位）而不是上課日期。
+   用法：/cron/overdue-remind?key=xxx，要另外在 Railway 開一條 Cron Job。 */
+app.get("/cron/overdue-remind", async (req, res) => {
+  try {
+    if (req.query.key !== CRON_KEY) return res.status(403).json({ ok: false });
+
+    const notifySettings = (await fbGet("settings/notify").catch(() => null)) || {};
+    const overdueCfg = notifySettings.overdue || {};
+    if (overdueCfg.enabled === false) {
+      return res.json({ ok: true, skip: "訂單逾時提醒目前已停用" });
+    }
+    const hoursAfter = Number.isFinite(overdueCfg.hoursAfter) ? overdueCfg.hoursAfter : 12;
+    const cutoff = Date.now() - hoursAfter * 3600 * 1000;
+
+    const data = await fbGet("bookings");
+    const list = Object.entries(data || {})
+      .map(([id, v]) => ({ id, ...v }))
+      .filter(
+        (b) =>
+          b.deposit?.status !== "paid" &&
+          b.status !== "cancelled" &&
+          b.status !== "expired" &&
+          b.status !== "confirmed" &&
+          b.line?.userId &&
+          !b.overdueRemindedAt &&
+          new Date(b.ts || 0).getTime() < cutoff
+      );
+
+    let sent = 0;
+    const failed = [];
+    for (const b of list) {
+      const dep = b.deposit || {};
+      const depName =
+        dep.name ||
+        (dep.method === "points" ? "儲值金扣點" : dep.method === "transfer" ? "銀行匯款" : dep.method === "card" ? "現場刷卡" : "LINE Pay 訂金");
+
+      const bubble = card({
+        tag: "訂單逾時提醒",
+        tagColor: "#C0392B",
+        title: "Otto2 ARTCLUB 旗艦館",
+        rows: [
+          row("日期", dateLabel(b.date), true),
+          row("時段", b.actualTime || b.slot, true),
+          row("課程", itemLines(b.items).join("\n") || "—"),
+          row("訂金方式", depName),
+        ],
+        notes: "這筆預約的訂金還沒收到，請儘快完成付款保留位置，逾期名額可能會被釋放。",
+        footer: "Otto2 ARTCLUB 藝術工作室",
+      });
+
+      try {
+        await push(b.line.userId, [
+          { type: "flex", altText: `訂單逾時提醒：${b.date} ${b.slot}`, contents: bubble },
+        ]);
+        await fbPatch(`bookings/${b.id}`, { overdueRemindedAt: new Date().toISOString() });
+        sent++;
+      } catch (e) {
+        failed.push({ id: b.id, error: e.message });
+      }
+    }
+    res.json({ ok: true, hoursAfter, total: list.length, sent, failed });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/* ══ 手動廣播 ══
+   後台「通知設定」頁的手動廣播用。只有 otto2-admin.html 登入後拿到的
+   Firebase idToken 驗證得過，才讓打——驗證方式是拿 idToken 去問 Firebase
+   Auth 本人是誰，跟後台登入用的是同一組 Firebase 專案，不用另外管一套密碼。
+   收件人＝目前 bookings 裡出現過、留有 LINE 身分的不重複使用者。 */
+const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY || "AIzaSyDgPVrHEYScDfuIPyvsBNNEdSROKJBgHqY";
+
+async function verifyAdminIdToken(idToken) {
+  if (!idToken) return false;
+  const r = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${FIREBASE_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ idToken }),
+    }
+  );
+  if (!r.ok) return false;
+  const j = await r.json();
+  return !!(j.users && j.users[0]);
+}
+
+/* LINE multicast：一次最多 500 人，超過就切批次 */
+async function multicast(uids, messages) {
+  if (!LINE_TOKEN) throw new Error("缺少 LINE_TOKEN");
+  const batches = [];
+  for (let i = 0; i < uids.length; i += 500) batches.push(uids.slice(i, i + 500));
+  for (const to of batches) {
+    const res = await fetch("https://api.line.me/v2/bot/message/multicast", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${LINE_TOKEN}`,
+      },
+      body: JSON.stringify({ to, messages }),
+    });
+    if (!res.ok) throw new Error(`LINE multicast ${res.status}: ${await res.text()}`);
+  }
+}
+
+app.post("/admin/broadcast", async (req, res) => {
+  try {
+    const { idToken, text } = req.body || {};
+    if (!text || !text.trim()) return res.status(400).json({ ok: false, error: "缺少廣播內容" });
+    if (!(await verifyAdminIdToken(idToken))) {
+      return res.status(401).json({ ok: false, error: "登入已過期，請重新整理後台再試一次" });
+    }
+
+    const data = await fbGet("bookings");
+    const uids = [...new Set(Object.values(data || {}).map((b) => b.line?.userId).filter(Boolean))];
+
+    if (!uids.length) return res.json({ ok: true, recipients: 0 });
+    await multicast(uids, [{ type: "text", text }]);
+    console.log(`手動廣播 → ${uids.length} 人`);
+    res.json({ ok: true, recipients: uids.length });
+  } catch (e) {
+    console.error("廣播失敗：", e.message);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
