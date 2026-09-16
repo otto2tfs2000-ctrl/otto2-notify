@@ -53,6 +53,24 @@ const SELF_URL  = (process.env.SELF_URL || "https://otto2-notify-production.up.r
 const LIFF_URL  = process.env.LIFF_URL || "https://liff.line.me/2010906803-FMDYktUN";
 const HOLD_MIN  = Number(process.env.HOLD_MINUTES || 15);
 
+/* ── 訂金付款通知店家 ──
+   SECRETARY_LINE_TOKEN / OWNER_USER_ID：跟 line-ai-helper 的取貨提醒用同一組
+   （從 ai-post-loop 複製來的憑證），刻意不用客服帳號的 client，走小秘書帳號推播 */
+const SECRETARY_LINE_TOKEN = process.env.SECRETARY_LINE_TOKEN || "";
+const OWNER_USER_ID = process.env.OWNER_USER_ID || "";
+async function pushOwner(text) {
+  if (!SECRETARY_LINE_TOKEN || !OWNER_USER_ID) return;
+  const res = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${SECRETARY_LINE_TOKEN}`,
+    },
+    body: JSON.stringify({ to: OWNER_USER_ID, messages: [{ type: "text", text }] }),
+  });
+  if (!res.ok) console.error("店家付款通知失敗：", res.status, await res.text());
+}
+
 /* ── 課程／班表試算表：跟後台、客人端讀同一份 ──
    這裡只用「班表」分頁算時段容量，給 /liff/availability 用
    （客服機器人問時段滿了沒，就是打這支）。 */
@@ -896,6 +914,16 @@ app.all("/payment/confirm", async (req, res) => {
         { type: "flex", altText: `訂金已收到：${b.date} ${b.slot}`, contents: bubble },
       ]).catch((e) => console.error("訂金推播失敗：", e.message));
     }
+
+    /* 推播：通知店家有客人付了訂金（客人的推播只有客人自己看得到，店家要另外通知） */
+    const custName = (b.customer && b.customer.name) || "";
+    const custPhone = (b.customer && b.customer.phone) || "";
+    pushOwner(
+      `💰 訂金已付款\n` +
+        `${custName || "（未填姓名）"}${custPhone ? "　" + custPhone : ""}\n` +
+        `${dateLabel(b.date)}　${b.actualTime || b.slot}\n` +
+        `NT$${amount.toLocaleString()}`
+    ).catch((e) => console.error("店家付款通知失敗：", e.message));
 
     console.log("付款完成 →", orderId, bookingId, amount);
     res.json({ ok: true, orderId, bookingId, amount });
