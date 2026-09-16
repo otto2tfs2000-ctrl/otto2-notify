@@ -2,7 +2,24 @@ import express from "express";
 import crypto from "crypto";
 
 const app = express();
-app.use(express.json({ limit: "10mb" }));
+
+/* transactionId 是 LINE Pay 的 19 位數大整數交易 ID，超過 JS Number 安全
+   整數範圍（16 位數），直接用內建 JSON.parse 解析會悄悄失真——存進資料庫、
+   拿去打 Confirm API 的都變成另一個不存在的交易 ID（LINE Pay 回 1159
+   The transaction request does not exist）。在 JSON.parse 之前先把這個
+   欄位包成字串，全程當字串處理。兩邊都會經過這裡：LINE Pay 打我們的
+   /payment/confirm（走下面這段 body 解析），跟我們打 LINE Pay API 拿回應
+   （走 lpCall 那邊），各自要各自修一次。 */
+function parseBigIntSafeJson(text) {
+  if (!text) return {};
+  try {
+    return JSON.parse(text.replace(/"transactionId"\s*:\s*(\d+)/g, '"transactionId":"$1"'));
+  } catch {
+    return {};
+  }
+}
+app.use(express.text({ type: "*/*", limit: "10mb" }));
+app.use((req, _res, next) => { req.body = parseBigIntSafeJson(req.body); next(); });
 
 /* 跨網域授權：預約頁在 github.io，服務在 railway.app */
 app.use((req, res, next) => {
@@ -810,7 +827,7 @@ async function lpCall(method, uri, body) {
     },
     ...(method === "GET" ? {} : { body: payload }),
   });
-  const json = await res.json().catch(() => ({}));
+  const json = parseBigIntSafeJson(await res.text().catch(() => ""));
   console.log(`LINE Pay ${method} ${uri} →`, json.returnCode, json.returnMessage || "");
   return json;
 }
