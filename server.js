@@ -869,7 +869,10 @@ async function createPaymentOrder(bookingId) {
     payment: { orderId, transactionId: r.info.transactionId, status: "pending" },
   });
 
-  return { orderId, paymentUrl: r.info.paymentUrl, transactionId: r.info.transactionId, amount };
+  /* r.info.paymentUrl 是 {web, app} 物件，不是純網址字串——
+     web 版在任何瀏覽器/LINE 內建瀏覽器都打得開，LINE Pay 自己會視情況導去 app，
+     用它當唯一連結最保險。 */
+  return { orderId, paymentUrl: r.info.paymentUrl.web, transactionId: r.info.transactionId, amount };
 }
 
 app.post("/payment/create", async (req, res) => {
