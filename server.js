@@ -869,10 +869,12 @@ async function createPaymentOrder(bookingId) {
     payment: { orderId, transactionId: r.info.transactionId, status: "pending" },
   });
 
-  /* r.info.paymentUrl 是 {web, app} 物件，不是純網址字串——
-     web 版在任何瀏覽器/LINE 內建瀏覽器都打得開，LINE Pay 自己會視情況導去 app，
-     用它當唯一連結最保險。 */
-  return { orderId, paymentUrl: r.info.paymentUrl.web, transactionId: r.info.transactionId, amount };
+  /* r.info.paymentUrl 是 {web, app} 物件，不是純網址字串。
+     這個連結永遠是在 LINE 生態圈裡被點開的（LINE 聊天室的 Flex 按鈕、
+     或 LIFF 預約頁），用 web 版會被 LINE 內建瀏覽器包住，LINE Pay 認不出
+     環境、卡在「請用預設瀏覽器」那頁打不開。改用 app 版（line://pay/...），
+     直接在 LINE App 內開啟 LINE Pay，不會跳瀏覽器。 */
+  return { orderId, paymentUrl: r.info.paymentUrl.app, transactionId: r.info.transactionId, amount };
 }
 
 app.post("/payment/create", async (req, res) => {
