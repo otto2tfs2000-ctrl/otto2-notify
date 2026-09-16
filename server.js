@@ -440,11 +440,13 @@ app.post("/notify/booking", async (req, res) => {
       ? `${depName}　${dep.method === "points" ? dep.amount + " 點" : "NT$" + dep.amount}`
       : depName;
 
-    /* LINE Pay 訂金：產生這筆預約專屬的付款連結，客人點了付款，
-       LINE Pay 才知道是哪一筆訂單，付款完成會自動回寫、行政後台也會自動跳已收，
-       不用再靠客人截圖、行政手動核對末五碼。b.id 沒帶到就退回舊的「請截圖」文字。 */
-    let payButton = null;
-    let depNote =
+    /* LINE Pay 這個商家的線上服務通路目前 Confirm 那步一直卡 LINE Pay
+       1169（換帳號、換付款方式都一樣），還沒確認開通前，客人這邊一律退回
+       舊的「請截圖回傳 LINE」人工核對流程。createPaymentOrder 這支函式
+       本身留著沒刪——LINE Pay 那邊確認開通後，把下面這段 payButton 的
+       邏輯放回來就好，不用重寫。 */
+    const payButton = null;
+    const depNote =
       dep.method === "points"
         ? "我們將為你預扣點數，小編確認後會再回覆你。"
         : dep.method === "transfer"
@@ -452,18 +454,6 @@ app.post("/notify/booking", async (req, res) => {
         : dep.method === "card"
         ? "訂金於上課當日至櫃檯刷卡，小編會再與你確認。"
         : "請於今日內完成 LINE Pay 訂金付款並回傳截圖，小編確認後預約才算保留成功。";
-
-    if (dep.method === "linepay" && b.id) {
-      try {
-        const order = await createPaymentOrder(b.id);
-        if (!order.already) {
-          payButton = { label: `立即付款 NT$${order.amount.toLocaleString()}`, uri: order.paymentUrl };
-          depNote = "點下方按鈕完成 LINE Pay 付款，系統會自動確認、幫你保留位置。";
-        }
-      } catch (e) {
-        console.error("建立訂金付款連結失敗，退回舊流程：", e.message);
-      }
-    }
 
     const bubble = card({
       tag: "預約成功通知",
