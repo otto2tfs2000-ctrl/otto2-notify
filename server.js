@@ -375,7 +375,7 @@ const row = (label, value, bold = false) => ({
   ],
 });
 
-function card({ tag, tagColor, title, rows, notes, footer }) {
+function card({ tag, tagColor, title, rows, notes, footer, button }) {
   return {
     type: "bubble",
     body: {
@@ -393,11 +393,15 @@ function card({ tag, tagColor, title, rows, notes, footer }) {
           : []),
       ],
     },
-    footer: footer
+    footer: button || footer
       ? {
-          type: "box", layout: "vertical",
+          type: "box", layout: "vertical", spacing: "sm",
           contents: [
-            { type: "text", text: footer, size: "xxs", color: SOFT, align: "center" },
+            ...(button
+              ? [{ type: "button", style: "primary", color: NAVY, height: "sm",
+                   action: { type: "uri", label: button.label, uri: button.uri } }]
+              : []),
+            ...(footer ? [{ type: "text", text: footer, size: "xxs", color: SOFT, align: "center" }] : []),
           ],
         }
       : undefined,
@@ -418,7 +422,12 @@ app.post("/notify/booking", async (req, res) => {
     const depText = dep.amount
       ? `${depName}　${dep.method === "points" ? dep.amount + " 點" : "NT$" + dep.amount}`
       : depName;
-    const depNote =
+
+    /* LINE Pay 訂金：產生這筆預約專屬的付款連結，客人點了付款，
+       LINE Pay 才知道是哪一筆訂單，付款完成會自動回寫、行政後台也會自動跳已收，
+       不用再靠客人截圖、行政手動核對末五碼。b.id 沒帶到就退回舊的「請截圖」文字。 */
+    let payButton = null;
+    let depNote =
       dep.method === "points"
         ? "我們將為你預扣點數，小編確認後會再回覆你。"
         : dep.method === "transfer"
@@ -426,6 +435,18 @@ app.post("/notify/booking", async (req, res) => {
         : dep.method === "card"
         ? "訂金於上課當日至櫃檯刷卡，小編會再與你確認。"
         : "請於今日內完成 LINE Pay 訂金付款並回傳截圖，小編確認後預約才算保留成功。";
+
+    if (dep.method === "linepay" && b.id) {
+      try {
+        const order = await createPaymentOrder(b.id);
+        if (!order.already) {
+          payButton = { label: `立即付款 NT$${order.amount.toLocaleString()}`, uri: order.paymentUrl };
+          depNote = "點下方按鈕完成 LINE Pay 付款，系統會自動確認、幫你保留位置。";
+        }
+      } catch (e) {
+        console.error("建立訂金付款連結失敗，退回舊流程：", e.message);
+      }
+    }
 
     const bubble = card({
       tag: "預約成功通知",
@@ -440,6 +461,7 @@ app.post("/notify/booking", async (req, res) => {
         row("訂金", depText),
       ],
       notes: depNote,
+      button: payButton,
       footer: "Otto2 ARTCLUB 藝術工作室",
     });
 
@@ -793,64 +815,76 @@ async function lpCall(method, uri, body) {
   return json;
 }
 
-/* ══ 4. 建立付款：前端只傳 bookingId，金額一律從資料庫取 ══ */
+/* ══ 4. 建立付款：金額一律從資料庫取，bookingId 兩邊共用 ══
+   /notify/booking（預約成功當下）跟 /payment/create（前端手動補付）都會呼叫這支，
+   邏輯只寫一份，避免兩邊各自兜一份 request payload 之後跑掉。 */
+async function createPaymentOrder(bookingId) {
+  const b = await fbGet(`bookings/${bookingId}`);
+  if (!b) { const e = new Error("找不到這筆預約"); e.code = "NOT_FOUND"; throw e; }
+  if (b.status === "cancelled") { const e = new Error("這筆預約已取消"); e.code = "CANCELLED"; throw e; }
+  if (b.deposit?.status === "paid") return { already: true };
+
+  const amount = Number(b.deposit?.amount || 0);
+  if (!amount) { const e = new Error("這筆預約沒有訂金金額"); e.code = "NO_AMOUNT"; throw e; }
+
+  /* orderId 自己編，不用 Firebase key（它開頭可能是減號） */
+  const orderId = "OT" + Date.now().toString(36).toUpperCase() + crypto.randomBytes(3).toString("hex").toUpperCase();
+  const courseName = b.items?.[0]?.name || "課程";
+
+  const r = await lpCall("POST", "/v3/payments/request", {
+    amount,
+    currency: "TWD",
+    orderId,
+    packages: [
+      {
+        id: orderId,
+        amount,
+        name: "Otto2 ARTCLUB",
+        products: [{ name: `${courseName} 訂金`, quantity: 1, price: amount }],
+      },
+    ],
+    redirectUrls: {
+      /* SERVER：由 LINE Pay 伺服器直接回打，客人關掉頁面也不影響 */
+      confirmUrl: `${SELF_URL}/payment/confirm`,
+      confirmUrlType: "SERVER",
+      cancelUrl: `${SELF_URL}/payment/cancel?orderId=${orderId}`,
+    },
+  });
+
+  if (r.returnCode !== "0000") {
+    const e = new Error(`LINE Pay ${r.returnCode}：${r.returnMessage}`);
+    e.code = "LINEPAY_ERROR";
+    throw e;
+  }
+
+  /* 對照表：confirm 回來時靠 orderId 找回是哪筆預約 */
+  await fbPatch(`payments/${orderId}`, {
+    bookingId,
+    amount,
+    status: "pending",
+    transactionId: r.info.transactionId,
+    createdAt: new Date().toISOString(),
+  });
+  await fbPatch(`bookings/${bookingId}`, {
+    payment: { orderId, transactionId: r.info.transactionId, status: "pending" },
+  });
+
+  return { orderId, paymentUrl: r.info.paymentUrl, transactionId: r.info.transactionId, amount };
+}
+
 app.post("/payment/create", async (req, res) => {
   try {
     const bookingId = (req.body || {}).bookingId;
     if (!bookingId) return res.status(400).json({ ok: false, error: "缺少 bookingId" });
 
-    const b = await fbGet(`bookings/${bookingId}`);
-    if (!b) return res.status(404).json({ ok: false, error: "找不到這筆預約" });
-    if (b.status === "cancelled") return res.status(409).json({ ok: false, error: "這筆預約已取消" });
-    if (b.deposit?.status === "paid")
-      return res.json({ ok: true, already: true, message: "訂金已付款" });
+    const order = await createPaymentOrder(bookingId);
+    if (order.already) return res.json({ ok: true, already: true, message: "訂金已付款" });
 
-    const amount = Number(b.deposit?.amount || 0);
-    if (!amount) return res.status(400).json({ ok: false, error: "這筆預約沒有訂金金額" });
-
-    /* orderId 自己編，不用 Firebase key（它開頭可能是減號） */
-    const orderId = "OT" + Date.now().toString(36).toUpperCase() + crypto.randomBytes(3).toString("hex").toUpperCase();
-    const courseName = b.items?.[0]?.name || "課程";
-
-    const r = await lpCall("POST", "/v3/payments/request", {
-      amount,
-      currency: "TWD",
-      orderId,
-      packages: [
-        {
-          id: orderId,
-          amount,
-          name: "Otto2 ARTCLUB",
-          products: [{ name: `${courseName} 訂金`, quantity: 1, price: amount }],
-        },
-      ],
-      redirectUrls: {
-        /* SERVER：由 LINE Pay 伺服器直接回打，客人關掉頁面也不影響 */
-        confirmUrl: `${SELF_URL}/payment/confirm`,
-        confirmUrlType: "SERVER",
-        cancelUrl: `${SELF_URL}/payment/cancel?orderId=${orderId}`,
-      },
-    });
-
-    if (r.returnCode !== "0000")
-      return res.status(502).json({ ok: false, error: `LINE Pay ${r.returnCode}：${r.returnMessage}` });
-
-    /* 對照表：confirm 回來時靠 orderId 找回是哪筆預約 */
-    await fbPatch(`payments/${orderId}`, {
-      bookingId,
-      amount,
-      status: "pending",
-      transactionId: r.info.transactionId,
-      createdAt: new Date().toISOString(),
-    });
-    await fbPatch(`bookings/${bookingId}`, {
-      payment: { orderId, transactionId: r.info.transactionId, status: "pending" },
-    });
-
-    res.json({ ok: true, orderId, paymentUrl: r.info.paymentUrl, transactionId: r.info.transactionId });
+    res.json({ ok: true, ...order });
   } catch (e) {
     console.error("建立付款失敗：", e.message);
-    res.status(500).json({ ok: false, error: e.message });
+    const status = e.code === "NOT_FOUND" ? 404 : e.code === "CANCELLED" ? 409 : e.code === "LINEPAY_ERROR" ? 502 : 500;
+    res.status(status).json({ ok: false, error: e.message });
   }
 });
 
