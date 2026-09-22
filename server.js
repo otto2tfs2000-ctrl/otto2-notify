@@ -1522,8 +1522,14 @@ app.post("/liff/slots", async (req, res) => {
         : [b.slot, b.slot2].filter(Boolean);
       for (const sl of slotList) {
         if (!sl) continue;
+        /* 自訂時段（例如後台手動登記加開的 09:30-11:30）要歸進最接近的
+           那一場才算得準——跟下面 /liff/availability 用同一套 bkBase()，
+           不然這裡沒歸併，客人端會看到「還有位子」，其實那個時段已經
+           被加開時段的人佔掉了，容量算少，造成超收。 */
+        const base = bkBase(sl) || (BK_SLOTS.includes(sl) || sl === BK_EVE_SLOT ? sl : "");
+        if (!base) continue;
         if (!out[d]) out[d] = {};
-        out[d][sl] = (out[d][sl] || 0) + seats;
+        out[d][base] = (out[d][base] || 0) + seats;
       }
     }
     res.json({ ok: true, used: out });
@@ -1918,7 +1924,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-08-27-slotcap-split";
+const SERVER_VERSION = "2026-09-22-liffslots-basepool";
 
 app.get("/health", async (_, res) => {
   const out = {
