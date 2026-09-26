@@ -1761,17 +1761,6 @@ app.post("/liff/cancelBooking", async (req, res) => {
       });
       push(b.line.userId, [{ type: "flex", altText: "預約取消成功", contents: bubble }]).catch(() => {});
     }
-
-    /* 通知店家：以前只有後台開著才會跳一次桌面通知，老闆常常沒看到（2026-09-26） */
-    const custName = (b.customer && b.customer.name) || "";
-    const custPhone = (b.customer && b.customer.phone) || "";
-    pushOwner(
-      `❌ 客人自己取消預約\n` +
-        `${custName || "（未填姓名）"}${custPhone ? "　" + custPhone : ""}\n` +
-        `${dateLabel(b.date)}　${b.actualTime || b.slot}　${b.people || "?"} 位\n` +
-        `${itemLines(b.items).join("、") || ""}${reason ? "\n原因：" + reason : ""}`
-    ).catch((e) => console.error("店家取消通知失敗：", e.message));
-
     res.json({ ok: true });
   } catch (e) {
     console.error("/liff/cancelBooking 失敗：", e.message);
@@ -1935,7 +1924,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-09-26-cancel-owner-push";
+const SERVER_VERSION = "2026-09-22-liffslots-basepool";
 
 app.get("/health", async (_, res) => {
   const out = {
