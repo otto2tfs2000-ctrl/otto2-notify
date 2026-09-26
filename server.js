@@ -1924,7 +1924,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-09-22-liffslots-basepool";
+const SERVER_VERSION = "2026-09-26-no-cancel-push";
 
 app.get("/health", async (_, res) => {
   const out = {
