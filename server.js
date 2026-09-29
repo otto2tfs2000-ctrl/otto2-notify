@@ -2143,35 +2143,58 @@ async function gResolvePhone(who, body) {
   return { phone: want };
 }
 
+/* ── 活動開始前的測試模式 ──
+   員工名單裡的人（後台登入用的 LINE 跟預約頁是同一個身分）和後台設定的測試電話，
+   活動開始前可以無限次玩，但一律「不入帳」：紅利、票券不寫進會員資料，
+   限量獎品也不扣庫存。玩的紀錄放在 gacha/testplayers，跟正式的 gacha/players 分開，
+   活動一開始就自動改讀正式的，測試資料不會影響任何人的上限或集章。
+   每轉一次就當成集滿一天，方便測到 7、14、21、28 天的保底。 */
+const gStaffCache = new Map();
+async function gIsStaff(uid) {
+  const hit = gStaffCache.get(uid);
+  if (hit && hit.until > Date.now()) return hit.v;
+  let v = false;
+  try { const st = await staffGet(`staff/${encodeURIComponent(uid)}`); v = !!(st && st.active !== false); } catch (e) {}
+  gStaffCache.set(uid, { v, until: Date.now() + 5 * 60000 });
+  return v;
+}
+async function gSim(cfg, phone, uid) {
+  if (gDay() >= cfg.start) return false;
+  return (cfg.testPhones || []).includes(phone) || (await gIsStaff(uid));
+}
+const gShiftDay = (d, n) => { const t = new Date(d + "T00:00:00Z"); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
+const fbDel = (path) => fetch(fbUrl(path), { method: "DELETE" });
+
 async function gState(cfg, who, phone) {
+  const sim = await gSim(cfg, phone, who.uid);
   const [pl, m, stock, logs] = await Promise.all([
-    fbGet(`gacha/players/${phone}`),
+    fbGet(`gacha/${sim ? "testplayers" : "players"}/${phone}`),
     fbGet(`members/${phone}`),
     fbGet("gacha/stock"),
     fbGet("gacha/log", { orderBy: '"$key"', limitToLast: "40" }),
   ]);
   const p = pl || {};
   const today = gDay();
-  const reasons = await gChances(cfg, phone, who.uid);
-  const used = Number((p.days || {})[today]?.n) || 0;
+  const reasons = sim ? [{ why: "test", label: "測試模式" }] : await gChances(cfg, phone, who.uid);
+  const used = sim ? Number(p.spins) || 0 : Number((p.days || {})[today]?.n) || 0;
   const c = (m && m.cache) || {};
   const ticker = Object.values(logs || {})
     .filter((l) => l && l.type !== "none")
     .sort((a, b) => String(b.at).localeCompare(String(a.at)))
     .slice(0, 12)
     .map((l) => ({ who: gMask(l.name), nm: l.nm, ic: l.ic, at: l.at }));
-  const tester = (cfg.testPhones || []).includes(phone);
   return {
-    title: cfg.title, start: cfg.start, end: cfg.end, today, cap: cfg.cap, expiry: cfg.expiry,
-    status: today < cfg.start ? (tester ? "test" : "soon") : today > cfg.end ? "ended" : "on",
+    title: cfg.title, start: cfg.start, end: cfg.end, today, cap: cfg.cap, expiry: cfg.expiry, sim,
+    status: today < cfg.start ? (sim ? "test" : "soon") : today > cfg.end ? "ended" : "on",
     me: {
       name: p.name || (m && m.name) || who.displayName || "",
       phone: phone.slice(0, 4) + "-***-" + phone.slice(7),
       member: gIsMember(m),
-      points: Number(c.points) || 0, sessions: Number(c.sessions) || 0, bonus: Number(c.bonus) || 0,
+      points: Number(c.points) || 0, sessions: Number(c.sessions) || 0,
+      bonus: (Number(c.bonus) || 0) + (sim ? (Number(p.bonus) || 0) + (Number(p.msBonus) || 0) : 0),
       gotBonus: Number(p.bonus) || 0, lottery: Number(p.lottery) || 0,
     },
-    chances: { total: reasons.length, used, reasons },
+    chances: sim ? { total: used + 1, used, reasons: Array(used + 1).fill(reasons[0]) } : { total: reasons.length, used, reasons },
     days: Object.keys(p.days || {}).filter((d) => d >= cfg.start && d <= cfg.end),
     milestones: (cfg.milestones || []).map((x) => ({ d: x.d, nm: x.nm, got: !!(p.ms || {})[x.d] })),
     prizes: gPublicPrizes(cfg, stock || {}),
@@ -2249,18 +2272,19 @@ app.post("/gacha/spin", async (req, res) => {
       const phone = await fbGet(`gacha/bind/${who.uid}`);
       if (typeof phone !== "string" || !gValidPhone(phone)) throw Object.assign(new Error("請先輸入電話"), { code: "NEED_PHONE" });
       const today = gDay();
-      const tester = (cfg.testPhones || []).includes(phone);
+      const sim = await gSim(cfg, phone, who.uid);
+      const base = sim ? "gacha/testplayers" : "gacha/players";
       if (today > cfg.end) throw Object.assign(new Error("活動已經結束囉，謝謝你的參與！"), { code: "ENDED" });
-      if (today < cfg.start && !tester) throw Object.assign(new Error(`活動 ${cfg.start.slice(5).replace("-", "/")} 才開始喔`), { code: "SOON" });
+      if (today < cfg.start && !sim) throw Object.assign(new Error(`活動 ${cfg.start.slice(5).replace("-", "/")} 才開始喔`), { code: "SOON" });
 
       const [pl, m, stock] = await Promise.all([
-        fbGet(`gacha/players/${phone}`), fbGet(`members/${phone}`), fbGet("gacha/stock"),
+        fbGet(`${base}/${phone}`), fbGet(`members/${phone}`), fbGet("gacha/stock"),
       ]);
       const p = pl || {};
-      const reasons = await gChances(cfg, phone, who.uid);
-      const used = Number((p.days || {})[today]?.n) || 0;
-      if (used >= reasons.length) throw Object.assign(new Error("今天的機會用完了，明天再來轉！"), { code: "NO_CHANCE" });
-      const reason = reasons[used];
+      const reasons = sim ? [{ why: "test", label: "測試模式" }] : await gChances(cfg, phone, who.uid);
+      const used = sim ? Number(p.spins) || 0 : Number((p.days || {})[today]?.n) || 0;
+      if (!sim && used >= reasons.length) throw Object.assign(new Error("今天的機會用完了，明天再來轉！"), { code: "NO_CHANCE" });
+      const reason = sim ? reasons[0] : reasons[used];
       const sure = !!reason.sure || (cfg.doubleDays || []).includes(today);
       const member = gIsMember(m);
       const won = p.won || {};
@@ -2288,45 +2312,50 @@ app.post("/gacha/spin", async (req, res) => {
       const logRef = await fbPost("gacha/log", {
         at: new Date().toISOString(), date: today, phone, name, uid: who.uid,
         pid: prize.id, nm: prize.nm, ic: prize.ic, type: prize.type, v: prize.v, why: reason.why,
-        test: today < cfg.start || undefined,
+        test: today < cfg.start || undefined, sim: sim || undefined,
       });
       const gid = logRef && logRef.name;
 
       const patch = {};
       if (prize.type === "bonus") {
-        await gAddBonus(phone, name, prize.v, `${cfg.title}・紅利 ${prize.v} 點`);
+        if (!sim) await gAddBonus(phone, name, prize.v, `${cfg.title}・紅利 ${prize.v} 點`);
         patch.bonus = gotBonus + prize.v;
       } else if (prize.type === "ticket") {
-        await gAddTicket(phone, name, hit, cfg, gid);
+        if (!sim) await gAddTicket(phone, name, hit, cfg, gid);
       } else if (prize.type === "lottery") {
         patch.lottery = (Number(p.lottery) || 0) + 1;
       }
       if (prize.type !== "lottery" && prize.id !== "none") {
         patch[`won/${prize.id}`] = (Number(won[prize.id]) || 0) + 1;
       }
-      if (hit.qty != null && prize.type !== "lottery") {
+      if (!sim && hit.qty != null && prize.type !== "lottery") {
         await fbPut(`gacha/stock/${hit.id}`, (Number(st[hit.id]) || 0) + 1);
       }
-      patch[`days/${today}/n`] = used + 1;
+      /* 測試模式每轉一次就當成多集一天，從活動第一天往後蓋章 */
+      const simDays = Object.keys(p.days || {}).length;
+      if (sim) { patch.spins = used + 1; patch[`days/${gShiftDay(cfg.start, simDays)}/n`] = 1; }
+      else patch[`days/${today}/n`] = used + 1;
 
       /* 集章：今天第一次玩才算新的一天，達標就發保底（不佔紅利上限） */
       let milestone = null;
-      if (used === 0) {
-        const days = Object.keys(p.days || {}).filter((d) => d >= cfg.start && d <= cfg.end && d !== today).length + 1;
+      if (sim || used === 0) {
+        const days = sim ? simDays + 1
+          : Object.keys(p.days || {}).filter((d) => d >= cfg.start && d <= cfg.end && d !== today).length + 1;
         const ms = (cfg.milestones || []).find((x) => x.d === days && !(p.ms || {})[x.d]);
         if (ms) {
           milestone = { d: ms.d, nm: ms.nm, type: ms.type };
-          if (ms.type === "bonus") await gAddBonus(phone, name, Number(ms.v) || 0, `${cfg.title}・集章 ${ms.d} 天`);
+          if (sim) { if (ms.type === "bonus") patch.msBonus = (Number(p.msBonus) || 0) + (Number(ms.v) || 0); }
+          else if (ms.type === "bonus") await gAddBonus(phone, name, Number(ms.v) || 0, `${cfg.title}・集章 ${ms.d} 天`);
           else await gAddTicket(phone, name, ms, cfg, gid + "-ms");
           patch[`ms/${ms.d}`] = true;
           await fbPost("gacha/log", {
             at: new Date().toISOString(), date: today, phone, name, uid: who.uid,
             pid: "ms" + ms.d, nm: `集章 ${ms.d} 天・${ms.nm}`, ic: "🏅", type: ms.type, v: Number(ms.v) || 0, why: "milestone",
-            test: today < cfg.start || undefined,
+            test: today < cfg.start || undefined, sim: sim || undefined,
           });
         }
       }
-      await fbPatch(`gacha/players/${phone}`, patch);
+      await fbPatch(`${base}/${phone}`, patch);
       return { prize, milestone, sure, why: reason.why, gid, cfg, phone };
     });
     const state = await gState(out.cfg, who, out.phone);
@@ -2378,6 +2407,31 @@ app.post("/staff/gacha/config", async (req, res) => {
   } catch (e) { gErr(res, e); }
 });
 
+/* 活動開始前清空所有測試紀錄：測試模式的遊玩紀錄、抽獎紀錄、庫存計數，
+   還有活動開始前在正式區玩過的次數。綁好的電話保留，不用重新綁。
+   已經寫進會員明細的紅利不會動（要收回請到會員分頁調整）。 */
+app.post("/staff/gacha/reset-test", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const cfg = await gConfig();
+    if (gDay() >= cfg.start) throw Object.assign(new Error("活動已經開始了，不能清空紀錄"), { code: "BAD" });
+    const [players, log] = await Promise.all([fbGet("gacha/players"), fbGet("gacha/log")]);
+    await fbDel("gacha/testplayers");
+    await fbDel("gacha/stock");
+    const pp = {};
+    for (const ph in players || {}) {
+      const p = players[ph] || {};
+      pp[ph] = { uid: p.uid || null, name: p.name || "", lineName: p.lineName || "", first: p.first || null };
+    }
+    if (Object.keys(pp).length) await fbPatch("gacha/players", pp);
+    const lp = {};
+    for (const k in log || {}) if (log[k] && log[k].test) lp[k] = null;
+    if (Object.keys(lp).length) await fbPatch("gacha/log", lp);
+    res.json({ ok: true, players: Object.keys(pp).length, logs: Object.keys(lp).length });
+  } catch (e) { gErr(res, e); }
+});
+
 /* 客人拿抽到的券來用，後台按「已使用」 */
 app.post("/staff/gacha/redeem", async (req, res) => {
   const s = await requireStaff(req, res);
@@ -2423,7 +2477,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-09-30-shipment-gacha";
+const SERVER_VERSION = "2026-09-30-gacha-testmode";
 
 app.get("/health", async (_, res) => {
   const out = {
