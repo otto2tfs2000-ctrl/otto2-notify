@@ -587,6 +587,46 @@ app.post("/notify/cancel", async (req, res) => {
   }
 });
 
+/* ══ 2.5 作品寄出（2026-09-30）══
+   後台「寄送」按「已寄出」時呼叫。客人不用再私訊問「寄了沒」，
+   單號直接在卡片上，超商取件的另外提醒要看取件簡訊。
+   內部備註、運費這些不會傳過來，只推客人需要知道的。 */
+app.post("/notify/shipment", async (req, res) => {
+  try {
+    const s = req.body || {};
+    const uid = s.lineUserId;
+    if (!uid) return res.json({ ok: false, skip: "無 LINE 身分" });
+
+    const rows = [
+      row("寄送方式", s.wayName || "—", true),
+      ...(s.carrier ? [row("物流", s.carrier)] : []),
+      ...(s.trackingNo ? [row("單號", s.trackingNo, true)] : []),
+      row("收件人", s.recipient || "—"),
+      ...(s.dest ? [row(s.isStore ? "取件門市" : "地址", s.dest)] : []),
+      ...(s.items ? [row("內容", s.items)] : []),
+      ...(s.shippedDate ? [row("寄出日期", dateLabel(s.shippedDate))] : []),
+    ];
+    const bubble = card({
+      tag: "作品寄出",
+      tagColor: GOLD,
+      title: "你的作品已經寄出囉 📦",
+      rows,
+      notes: s.isStore
+        ? "送達門市後會收到超商的取件簡訊，記得在期限內去領取。收到後有任何問題，歡迎直接私訊小編。"
+        : "一般 1–3 天會送達。收到後有任何問題，歡迎直接私訊小編。",
+      footer: "Otto2 ARTCLUB 藝術工作室",
+    });
+
+    await push(uid, [
+      { type: "flex", altText: `作品已寄出${s.trackingNo ? "，單號 " + s.trackingNo : ""}`, contents: bubble },
+    ]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 /* ══ 3. 前一天提醒（Railway Cron 每天傍晚呼叫）══ */
 app.get("/cron/remind", async (req, res) => {
   try {
@@ -1924,7 +1964,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-09-26-no-cancel-push";
+const SERVER_VERSION = "2026-09-30-shipment";
 
 app.get("/health", async (_, res) => {
   const out = {
