@@ -2108,7 +2108,7 @@ async function gChances(cfg, phone, uid, day) {
   if (gm.quiz && day && day.quiz && day.quiz.ok) reasons.push({ why: "quiz", label: "答對今日問答" });
   if (gm.memory && day && day.memory) reasons.push({ why: "memory", label: "翻牌過關" });
   if ((cfg.doubleDays || []).includes(today)) reasons.push({ why: "double", label: "萬聖節加碼", sure: true });
-  return reasons;
+  return reasons.slice(0, Math.max(1, Number(cfg.maxDaily) || 5));
 }
 
 function gPublicPrizes(cfg, stock) {
@@ -2219,7 +2219,10 @@ async function gState(cfg, who, phone) {
     bears: gm.collect ? {
       list: (cfg.bears || []).map((b) => ({ id: b.id, nm: b.nm, rare: !!b.rare })),
       have: p.bears || {}, done: !!p.collected, reward: (cfg.collectReward || {}).nm || "",
+      limit: Number(cfg.collectLimit) || 0,
+      left: Number(cfg.collectLimit) ? Math.max(0, Number(cfg.collectLimit) - (Number((stock || {}).collect) || 0)) : null,
     } : null,
+    bonusToday: Number((p.bday || {})[today]) || 0, bonusDaily: Number(cfg.bonusDaily) || 2, maxDaily: Number(cfg.maxDaily) || 5,
   };
 }
 
@@ -2315,6 +2318,14 @@ app.post("/gacha/spin", async (req, res) => {
         (x.qty == null || (Number(st[x.id]) || 0) < x.qty) &&
         (x.per == null || (Number(won[x.id]) || 0) < x.per) &&
         (Number(x.w) || 0) > 0);
+      /* 一天最多中 bonusDaily 次紅利：中滿之後，紅利那幾格改成「送一隻造型小黑熊」，機率不變 */
+      const bToday = Number((p.bday || {})[today]) || 0;
+      const bMax = Number(cfg.bonusDaily) || 2;
+      if (bToday >= bMax) {
+        const bw = pool.filter((x) => x.type === "bonus").reduce((a, x) => a + (Number(x.w) || 0), 0);
+        pool = pool.filter((x) => x.type !== "bonus");
+        if (bw > 0 && (cfg.games || {}).collect) pool.push({ id: "bearonly", ic: "🐻", nm: "造型小黑熊", sub: "", type: "bear", w: bw });
+      }
       if (sure) pool = pool.filter((x) => x.type !== "none");
       if (!pool.length) pool = cfg.prizes.filter((x) => x.type === "none");
       const hit = gPick(pool);
@@ -2343,6 +2354,11 @@ app.post("/gacha/spin", async (req, res) => {
         if (!p.collected && bearList.every((x) => owned.has(x.id))) {
           collect = { ...(cfg.collectReward || { type: "ticket", kind: "goods", nm: "圖鑑集滿禮" }) };
           patch.collected = true;
+          /* 集滿禮限量：送完之後一樣算集滿，只是不送東西（測試模式不扣名額） */
+          const lim = Number(cfg.collectLimit) || 0;
+          const used2 = Number(st.collect) || 0;
+          if (lim && used2 >= lim) collect.soldOut = true;
+          else if (!sim) await fbPut("gacha/stock/collect", used2 + 1);
         }
         bear.count = owned.size; bear.total = bearList.length;
       }
@@ -2355,7 +2371,7 @@ app.post("/gacha/spin", async (req, res) => {
       });
       const gid = logRef && logRef.name;
 
-      if (collect) {
+      if (collect && !collect.soldOut) {
         if (!sim) {
           if (collect.type === "bonus") await gAddBonus(phone, name, Number(collect.v) || 0, `${cfg.title}・圖鑑集滿`);
           else await gAddTicket(phone, name, collect, cfg, gid + "-col");
@@ -2370,12 +2386,13 @@ app.post("/gacha/spin", async (req, res) => {
       if (prize.type === "bonus") {
         if (!sim) await gAddBonus(phone, name, prize.v, `${cfg.title}・紅利 ${prize.v} 點`);
         patch.bonus = gotBonus + prize.v;
+        patch[`bday/${today}`] = bToday + 1;
       } else if (prize.type === "ticket") {
         if (!sim) await gAddTicket(phone, name, hit, cfg, gid);
       } else if (prize.type === "lottery") {
         patch.lottery = (Number(p.lottery) || 0) + 1;
       }
-      if (prize.type !== "lottery" && prize.id !== "none") {
+      if (prize.type !== "lottery" && prize.type !== "bear" && prize.id !== "none") {
         patch[`won/${prize.id}`] = (Number(won[prize.id]) || 0) + 1;
       }
       if (!sim && hit.qty != null && prize.type !== "lottery") {
@@ -2434,6 +2451,9 @@ Object.assign(GACHA_DEFAULT, {
     { id: "gold",    nm: "金色熊", w: 4, rare: true },
   ],
   collectReward: { type: "ticket", kind: "goods", nm: "23cm 流動熊（圖鑑集滿禮）" },
+  collectLimit: 5,   /* 圖鑑集滿禮只送前幾位 */
+  maxDaily: 5,       /* 一天最多轉幾次（不管拿到幾種加碼） */
+  bonusDaily: 2,     /* 一天最多中幾次紅利，超過改送造型小黑熊 */
 });
 
 /* 預設題庫。後台「小遊戲」分頁存過之後，就以 gacha/quiz 為準。
@@ -2676,7 +2696,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-09-30-gacha-games";
+const SERVER_VERSION = "2026-09-30-gacha-limits";
 
 app.get("/health", async (_, res) => {
   const out = {
