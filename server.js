@@ -1996,15 +1996,22 @@ const GACHA_DEFAULT = {
   testPhones: [],              /* 活動開始前可以先玩的電話（自己人測試用） */
   doubleDays: ["2026-10-31"],  /* 這幾天多一次機會，而且一定中 */
   lotteryName: "月底大抽獎券",
+  /* 會員（手上有點數或堂數）跟新朋友抽不同的獎池（2026-09-30 大熊定）：
+     會員紅利 1/3/5/10、會員限定課程券；新朋友紅利 1/2/3、下次上課折抵券。
+     grp 相同的獎品算同一組，每人整組最多中 per 張（新朋友折抵券整個活動最多 1 張）。 */
   prizes: [
-    { id: "b1",   ic: "✨", nm: "紅利 1 點",  sub: "",               who: "all", type: "bonus",  v: 1,  w: 580 },
-    { id: "b3",   ic: "🌟", nm: "紅利 3 點",  sub: "",               who: "all", type: "bonus",  v: 3,  w: 120 },
-    { id: "b5",   ic: "💫", nm: "紅利 5 點",  sub: "",               who: "all", type: "bonus",  v: 5,  w: 40 },
-    { id: "b10",  ic: "💎", nm: "紅利 10 點", sub: "超幸運",          who: "all", type: "bonus",  v: 10, w: 20, qty: 20 },
-    { id: "none", ic: "🍀", nm: "明天再來",   sub: "今天的集章照樣算", who: "all", type: "none",   w: 220 },
+    { id: "b1",   ic: "✨", nm: "紅利 1 點",  sub: "",               who: "mem", type: "bonus",  v: 1,  w: 580 },
+    { id: "b3",   ic: "🌟", nm: "紅利 3 點",  sub: "",               who: "mem", type: "bonus",  v: 3,  w: 120 },
+    { id: "b5",   ic: "💫", nm: "紅利 5 點",  sub: "",               who: "mem", type: "bonus",  v: 5,  w: 40 },
+    { id: "b10",  ic: "💎", nm: "紅利 10 點", sub: "超幸運",          who: "mem", type: "bonus",  v: 10, w: 20, qty: 20 },
     { id: "upg",  ic: "🖼️", nm: "材料升級券", sub: "畫布升一號",      who: "mem", type: "ticket", kind: "goods",  w: 17, qty: 30, per: 1 },
     { id: "free", ic: "🎨", nm: "免費加一堂課", sub: "會員限定",       who: "mem", type: "ticket", kind: "bundle", w: 3,  qty: 5,  per: 1 },
-    { id: "c100", ic: "🎟️", nm: "課程折價 $100", sub: "一次上課限用一張", who: "new", type: "ticket", kind: "cash", w: 20, qty: 50, per: 1 },
+    { id: "n1",   ic: "✨", nm: "紅利 1 點",  sub: "",               who: "new", type: "bonus",  v: 1,  w: 600 },
+    { id: "n2",   ic: "🌟", nm: "紅利 2 點",  sub: "",               who: "new", type: "bonus",  v: 2,  w: 110 },
+    { id: "n3",   ic: "💫", nm: "紅利 3 點",  sub: "",               who: "new", type: "bonus",  v: 3,  w: 50 },
+    { id: "c50",  ic: "🎟️", nm: "下次上課折抵 $50",  sub: "一次限用一張・體驗價課程不適用", who: "new", type: "ticket", kind: "cash", w: 15, qty: 30, per: 1, grp: "coupon" },
+    { id: "c100", ic: "🎟️", nm: "下次上課折抵 $100", sub: "一次限用一張・體驗價課程不適用", who: "new", type: "ticket", kind: "cash", w: 5,  qty: 10, per: 1, grp: "coupon" },
+    { id: "none", ic: "🍀", nm: "明天再來",   sub: "今天的集章照樣算", who: "all", type: "none",   w: 220 },
   ],
   milestones: [
     { d: 7,  type: "bonus",  v: 3, nm: "紅利 3 點" },
@@ -2192,13 +2199,15 @@ async function gState(cfg, who, phone) {
     quiz = { q: S.q, o: S.o, lv: S.lv, answered: !!dq };
     if (dq) Object.assign(quiz, { ok: !!dq.ok, c: dq.c, a: S.a, t: S.t });
   }
+  const newOnly = new Set(cfg.prizes.filter((x) => x.who === "new").map((x) => x.id));
   const ticker = Object.values(logs || {})
-    .filter((l) => l && l.type !== "none" && !l.test)
+    .filter((l) => l && l.type !== "none" && !l.test && !newOnly.has(l.pid))
     .sort((a, b) => String(b.at).localeCompare(String(a.at)))
     .slice(0, 12)
     .map((l) => ({ who: gMask(l.name), nm: l.nm, ic: l.ic, at: l.at }));
   return {
-    title: cfg.title, start: cfg.start, end: cfg.end, today, cap: cfg.cap, expiry: cfg.expiry, sim,
+    title: cfg.title, start: cfg.start, end: cfg.end, today, expiry: cfg.expiry, sim,
+    cap: gIsMember(m) ? cfg.cap : (cfg.capNew != null ? Number(cfg.capNew) : cfg.cap),
     status: today < cfg.start ? (sim ? "test" : "soon") : today > cfg.end ? "ended" : "on",
     me: {
       name: p.name || (m && m.name) || who.displayName || "",
@@ -2223,7 +2232,8 @@ async function gState(cfg, who, phone) {
       limit: Number(cfg.collectLimit) || 0,
       left: Number(cfg.collectLimit) ? Math.max(0, Number(cfg.collectLimit) - (Number((stock || {}).collect) || 0)) : null,
     } : null,
-    bonusToday: Number((p.bday || {})[today]) || 0, bonusDaily: Number(cfg.bonusDaily) || 2, maxDaily: Number(cfg.maxDaily) || 5,
+    bonusToday: Number((p.bday || {})[today]) || 0, maxDaily: Number(cfg.maxDaily) || 5,
+    bonusDaily: gIsMember(m) ? Number(cfg.bonusDaily) || 2 : (cfg.bonusDailyNew != null ? Number(cfg.bonusDailyNew) : 1),
   };
 }
 
@@ -2318,10 +2328,11 @@ app.post("/gacha/spin", async (req, res) => {
         (x.who === "all" || x.who === (member ? "mem" : "new")) &&
         (x.qty == null || (Number(st[x.id]) || 0) < x.qty) &&
         (x.per == null || (Number(won[x.id]) || 0) < x.per) &&
+        (!x.grp || !cfg.prizes.some((y) => y.grp === x.grp && (Number(won[y.id]) || 0) > 0)) &&
         (Number(x.w) || 0) > 0);
       /* 一天最多中 bonusDaily 次紅利：中滿之後，紅利那幾格改成「送一隻造型小黑熊」，機率不變 */
       const bToday = Number((p.bday || {})[today]) || 0;
-      const bMax = Number(cfg.bonusDaily) || 2;
+      const bMax = member ? Number(cfg.bonusDaily) || 2 : (cfg.bonusDailyNew != null ? Number(cfg.bonusDailyNew) : 1);
       if (bToday >= bMax) {
         const bw = pool.filter((x) => x.type === "bonus").reduce((a, x) => a + (Number(x.w) || 0), 0);
         pool = pool.filter((x) => x.type !== "bonus");
@@ -2336,7 +2347,7 @@ app.post("/gacha/spin", async (req, res) => {
       let prize = { id: hit.id, ic: hit.ic, nm: hit.nm, sub: hit.sub || "", type: hit.type, v: hit.v || 0 };
       const gotBonus = Number(p.bonus) || 0;
       if (hit.type === "bonus") {
-        const room = cfg.cap - gotBonus;
+        const room = (member ? cfg.cap : (cfg.capNew != null ? Number(cfg.capNew) : cfg.cap)) - gotBonus;
         if (room <= 0) prize = { id: "lottery", ic: "🎫", nm: cfg.lotteryName, sub: "紅利已經領滿，改送抽獎券", type: "lottery", v: 0 };
         else if (hit.v > room) prize = { ...prize, v: room, nm: `紅利 ${room} 點` };
       }
@@ -2453,6 +2464,8 @@ Object.assign(GACHA_DEFAULT, {
   ],
   collectReward: { type: "ticket", kind: "goods", nm: "23cm 流動熊（圖鑑集滿禮）" },
   collectLimit: 5,   /* 圖鑑集滿禮只送前幾位 */
+  capNew: 15,        /* 新朋友整個活動期間，扭蛋最多拿幾點紅利（會員是 cap） */
+  bonusDailyNew: 1,  /* 新朋友一天最多中幾次紅利（會員是 bonusDaily） */
   maxDaily: 5,       /* 一天最多轉幾次（不管拿到幾種加碼） */
   bonusDaily: 2,     /* 一天最多中幾次紅利，超過改送造型小黑熊 */
 });
@@ -2762,7 +2775,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-09-30-gacha-launch";
+const SERVER_VERSION = "2026-09-30-gacha-tiers";
 
 app.get("/health", async (_, res) => {
   const out = {
