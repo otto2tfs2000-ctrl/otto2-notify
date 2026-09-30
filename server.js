@@ -2088,7 +2088,7 @@ function gIsMember(m) {
 }
 
 /* 今天有幾次機會、每一次是因為什麼 */
-async function gChances(cfg, phone, uid) {
+async function gChances(cfg, phone, uid, day) {
   const today = gDay(), todaySlash = todayStr();
   const reasons = [{ why: "daily", label: "每日一次" }];
   const all = await gBookings();
@@ -2104,6 +2104,9 @@ async function gChances(cfg, phone, uid) {
   }
   if (cls) reasons.push({ why: "class", label: "今天有來上課", sure: true });
   if (book) reasons.push({ why: "book", label: "今天線上預約" });
+  const gm = cfg.games || {};
+  if (gm.quiz && day && day.quiz && day.quiz.ok) reasons.push({ why: "quiz", label: "答對今日問答" });
+  if (gm.memory && day && day.memory) reasons.push({ why: "memory", label: "翻牌過關" });
   if ((cfg.doubleDays || []).includes(today)) reasons.push({ why: "double", label: "萬聖節加碼", sure: true });
   return reasons;
 }
@@ -2175,9 +2178,19 @@ async function gState(cfg, who, phone) {
   ]);
   const p = pl || {};
   const today = gDay();
-  const reasons = sim ? [{ why: "test", label: "測試模式" }] : await gChances(cfg, phone, who.uid);
-  const used = sim ? Number(p.spins) || 0 : Number((p.days || {})[today]?.n) || 0;
+  const day = (p.days || {})[today] || {};
+  const reasons = sim ? [{ why: "test", label: "測試模式" }] : await gChances(cfg, phone, who.uid, day);
+  const used = sim ? Number(p.spins) || 0 : Number(day.n) || 0;
   const c = (m && m.cache) || {};
+  const gm = cfg.games || {};
+  let quiz = null;
+  if (gm.quiz) {
+    const list = await gQuizList();
+    const dq = sim ? null : day.quiz;
+    const Q = list[dq ? dq.qi % list.length : gQuizIndex(list, today, sim ? p.quizN : 0)];
+    quiz = { q: Q.q, o: Q.o, answered: !!dq };
+    if (dq) Object.assign(quiz, { ok: !!dq.ok, c: dq.c, a: Number(Q.a), t: Q.t || "" });
+  }
   const ticker = Object.values(logs || {})
     .filter((l) => l && l.type !== "none")
     .sort((a, b) => String(b.at).localeCompare(String(a.at)))
@@ -2200,6 +2213,13 @@ async function gState(cfg, who, phone) {
     prizes: gPublicPrizes(cfg, stock || {}),
     ticker,
     doubleToday: (cfg.doubleDays || []).includes(today),
+    halloween: (cfg.halloweenDays || []).includes(today),
+    quiz,
+    memory: gm.memory ? { done: !sim && !!day.memory } : null,
+    bears: gm.collect ? {
+      list: (cfg.bears || []).map((b) => ({ id: b.id, nm: b.nm, rare: !!b.rare })),
+      have: p.bears || {}, done: !!p.collected, reward: (cfg.collectReward || {}).nm || "",
+    } : null,
   };
 }
 
@@ -2281,7 +2301,7 @@ app.post("/gacha/spin", async (req, res) => {
         fbGet(`${base}/${phone}`), fbGet(`members/${phone}`), fbGet("gacha/stock"),
       ]);
       const p = pl || {};
-      const reasons = sim ? [{ why: "test", label: "測試模式" }] : await gChances(cfg, phone, who.uid);
+      const reasons = sim ? [{ why: "test", label: "測試模式" }] : await gChances(cfg, phone, who.uid, (p.days || {})[today]);
       const used = sim ? Number(p.spins) || 0 : Number((p.days || {})[today]?.n) || 0;
       if (!sim && used >= reasons.length) throw Object.assign(new Error("今天的機會用完了，明天再來轉！"), { code: "NO_CHANCE" });
       const reason = sim ? reasons[0] : reasons[used];
@@ -2309,14 +2329,44 @@ app.post("/gacha/spin", async (req, res) => {
         else if (hit.v > room) prize = { ...prize, v: room, nm: `紅利 ${room} 點` };
       }
 
+      /* 黑熊圖鑑：每轉一次另外送一隻造型小黑熊，萬聖節當天南瓜熊比較容易出現 */
+      const patch = {};
+      let bear = null, collect = null;
+      const bearList = (cfg.games || {}).collect && Array.isArray(cfg.bears) ? cfg.bears : [];
+      if (bearList.length) {
+        const hw = (cfg.halloweenDays || []).includes(today);
+        const b = gPick(bearList.map((x) => ({ ...x, w: (Number(x.w) || 0) * (hw && x.id === "pumpkin" ? 3 : 1) })));
+        const have = p.bears || {};
+        bear = { id: b.id, nm: b.nm, rare: !!b.rare, isNew: !(Number(have[b.id]) > 0) };
+        patch[`bears/${b.id}`] = (Number(have[b.id]) || 0) + 1;
+        const owned = new Set(Object.keys(have).filter((k) => Number(have[k]) > 0).concat(b.id));
+        if (!p.collected && bearList.every((x) => owned.has(x.id))) {
+          collect = { ...(cfg.collectReward || { type: "ticket", kind: "goods", nm: "圖鑑集滿禮" }) };
+          patch.collected = true;
+        }
+        bear.count = owned.size; bear.total = bearList.length;
+      }
+
       const logRef = await fbPost("gacha/log", {
         at: new Date().toISOString(), date: today, phone, name, uid: who.uid,
         pid: prize.id, nm: prize.nm, ic: prize.ic, type: prize.type, v: prize.v, why: reason.why,
+        bear: bear ? bear.id : undefined,
         test: today < cfg.start || undefined, sim: sim || undefined,
       });
       const gid = logRef && logRef.name;
 
-      const patch = {};
+      if (collect) {
+        if (!sim) {
+          if (collect.type === "bonus") await gAddBonus(phone, name, Number(collect.v) || 0, `${cfg.title}・圖鑑集滿`);
+          else await gAddTicket(phone, name, collect, cfg, gid + "-col");
+        }
+        await fbPost("gacha/log", {
+          at: new Date().toISOString(), date: today, phone, name, uid: who.uid,
+          pid: "collect", nm: `圖鑑集滿・${collect.nm}`, ic: "📖", type: collect.type || "ticket", v: Number(collect.v) || 0, why: "collect",
+          test: today < cfg.start || undefined, sim: sim || undefined,
+        });
+      }
+
       if (prize.type === "bonus") {
         if (!sim) await gAddBonus(phone, name, prize.v, `${cfg.title}・紅利 ${prize.v} 點`);
         patch.bonus = gotBonus + prize.v;
@@ -2356,10 +2406,157 @@ app.post("/gacha/spin", async (req, res) => {
         }
       }
       await fbPatch(`${base}/${phone}`, patch);
-      return { prize, milestone, sure, why: reason.why, gid, cfg, phone };
+      return { prize, milestone, bear, collect, sure, why: reason.why, gid, cfg, phone };
     });
     const state = await gState(out.cfg, who, out.phone);
-    res.json({ ok: true, prize: out.prize, milestone: out.milestone, sure: out.sure, why: out.why, state });
+    res.json({ ok: true, prize: out.prize, milestone: out.milestone, bear: out.bear, collect: out.collect, sure: out.sure, why: out.why, state });
+  } catch (e) { gErr(res, e); }
+});
+
+
+/* ══ 扭蛋第二波：藝術小問答、翻牌配對、黑熊圖鑑、萬聖節造型（2026-09-30）══
+   - 小問答：每天一題（每個人同一題），答對當天多一次扭蛋，一天只能答一次
+   - 翻牌配對：60 秒內配完 6 對，當天多一次扭蛋，一天只算一次
+     （過關是網頁自己回報的，改得到網頁的人可以直接拿這一次，最多也就每天一次，可以接受）
+   - 黑熊圖鑑：每轉一次扭蛋，另外隨機得到一隻造型小黑熊，集滿全部送圖鑑禮（不佔紅利上限）
+   - 萬聖節造型：halloweenDays 那幾天扭蛋機換裝，南瓜熊比較容易出現 */
+Object.assign(GACHA_DEFAULT, {
+  games: { quiz: true, memory: true, collect: true },
+  halloweenDays: ["2026-10-31"],
+  bears: [
+    { id: "paint",   nm: "繪畫熊", w: 20 },
+    { id: "sketch",  nm: "素描熊", w: 20 },
+    { id: "pour",    nm: "流動熊", w: 20 },
+    { id: "yarn",    nm: "毛線熊", w: 20 },
+    { id: "crystal", nm: "水晶熊", w: 15 },
+    { id: "aroma",   nm: "擴香熊", w: 15 },
+    { id: "pumpkin", nm: "南瓜熊", w: 6, rare: true },
+    { id: "gold",    nm: "金色熊", w: 4, rare: true },
+  ],
+  collectReward: { type: "ticket", kind: "goods", nm: "23cm 流動熊（圖鑑集滿禮）" },
+});
+
+/* 預設題庫。後台「小遊戲」分頁存過之後，就以 gacha/quiz 為準。
+   a 是正確答案在 o 裡的位置（從 0 開始）。 */
+const GACHA_QUIZ = [
+  { q: "紅色加黃色，會變成什麼顏色？", o: ["綠色", "橙色", "紫色", "咖啡色"], a: 1, t: "紅和黃混在一起是橙色，像夕陽的顏色。" },
+  { q: "藍色加黃色，會變成什麼顏色？", o: ["綠色", "紫色", "橙色", "灰色"], a: 0, t: "藍 + 黃 = 綠，畫草地樹葉就靠它。" },
+  { q: "紅色加藍色，會變成什麼顏色？", o: ["橙色", "咖啡色", "紫色", "綠色"], a: 2, t: "紅 + 藍 = 紫，紅多一點偏紫紅，藍多一點偏藍紫。" },
+  { q: "顏料的三原色是哪三個？", o: ["紅、綠、藍", "黑、白、灰", "橙、綠、紫", "紅、黃、藍"], a: 3, t: "紅黃藍是顏料的三原色，其他顏色幾乎都能用它們調出來。" },
+  { q: "《星夜》是哪一位畫家的作品？", o: ["梵谷", "莫內", "畢卡索", "達文西"], a: 0, t: "梵谷在 1889 年畫了《星夜》，旋轉的星空超有名。" },
+  { q: "《蒙娜麗莎》是誰畫的？", o: ["米開朗基羅", "達文西", "拉斐爾", "梵谷"], a: 1, t: "達文西畫的《蒙娜麗莎》，現在收藏在法國羅浮宮。" },
+  { q: "梵谷畫過好幾幅很有名的哪一種花？", o: ["玫瑰", "鬱金香", "向日葵", "櫻花"], a: 2, t: "梵谷的《向日葵》系列有好幾幅，黃色用得超大膽。" },
+  { q: "莫內畫了很多幅的系列作品，主角是什麼？", o: ["睡蓮", "向日葵", "馬", "高山"], a: 0, t: "莫內在自家花園的池塘畫了兩百多幅睡蓮。" },
+  { q: "白色加上哪一個顏色，會變成粉紅色？", o: ["藍色", "黃色", "綠色", "紅色"], a: 3, t: "紅色加白色會變淡，就是粉紅色。" },
+  { q: "黑色加白色，會變成什麼顏色？", o: ["咖啡色", "灰色", "藍色", "紫色"], a: 1, t: "黑白混合是灰色，白多一點就是淺灰。" },
+  { q: "下面哪一組是「冷色」？", o: ["紅色、橙色", "黃色、橙色", "藍色、綠色", "咖啡色、紅色"], a: 2, t: "藍色、綠色讓人想到水和森林，感覺比較涼，叫冷色。" },
+  { q: "畫家用來調顏料的板子叫什麼？", o: ["調色盤", "畫架", "畫布", "洗筆筒"], a: 0, t: "調色盤可以把顏料擠在上面，慢慢調出想要的顏色。" },
+  { q: "畫水彩時，主要用什麼把顏料調開？", o: ["油", "膠水", "水", "牛奶"], a: 2, t: "水彩顧名思義是用水調開，水越多顏色越淡越透明。" },
+  { q: "畢卡索跟哪一個畫派最有關係？", o: ["印象派", "立體派", "浪漫派", "寫實派"], a: 1, t: "畢卡索和布拉克一起開創了立體派，把東西拆成很多面來畫。" },
+  { q: "「印象派」這個名字，來自哪一幅畫？", o: ["《星夜》", "《吶喊》", "《蒙娜麗莎》", "《印象・日出》"], a: 3, t: "莫內的《印象・日出》被評論家拿來取笑，結果變成畫派的名字。" },
+  { q: "素描鉛筆上的「B」越多，代表什麼？", o: ["筆芯越軟、畫起來越黑", "筆芯越硬、越淡", "筆越長", "筆越貴"], a: 0, t: "B 代表黑（Black），6B 比 2B 軟、顏色更深；H 則是越硬越淡。" },
+  { q: "流動畫，是讓什麼顏料在畫布上流動出圖案？", o: ["蠟筆", "壓克力顏料", "粉彩", "墨汁"], a: 1, t: "流動畫用調稀的壓克力顏料，傾斜畫布讓顏色自己流出花紋。" },
+  { q: "台灣黑熊胸前的白色花紋，像哪一個英文字母？", o: ["O", "X", "V", "S"], a: 2, t: "台灣黑熊胸口有白色 V 字，就像我們扭蛋機上的小黑熊！" },
+  { q: "秋天時，台灣黑熊很愛吃下面哪一種食物？", o: ["青剛櫟的果實", "香蕉", "竹筍乾", "玉米片"], a: 0, t: "青剛櫟的橡實是黑熊秋天很重要的食物，吃飽才有體力過冬。" },
+  { q: "《吶喊》是哪一位畫家的作品？", o: ["梵谷", "孟克", "莫內", "塞尚"], a: 1, t: "挪威畫家孟克畫的《吶喊》，扭曲的天空表現出強烈的不安。" },
+  { q: "《戴珍珠耳環的少女》是誰畫的？", o: ["林布蘭", "達文西", "維梅爾", "雷諾瓦"], a: 2, t: "荷蘭畫家維梅爾的作品，少女回頭的眼神超經典。" },
+  { q: "在色相環上，紅色的「互補色」是什麼？", o: ["綠色", "橙色", "粉紅色", "黃色"], a: 0, t: "互補色在色相環上正對面，紅配綠放在一起特別顯眼。" },
+  { q: "黃色的互補色是什麼？", o: ["橙色", "藍綠色", "紅色", "紫色"], a: 3, t: "黃和紫是互補色，放在一起會讓兩個顏色都更亮。" },
+  { q: "想在畫布上畫很細的線，最適合用哪一種工具？", o: ["大平刷", "海綿", "細的圓頭畫筆", "滾筒"], a: 2, t: "細圓頭畫筆的筆尖小，適合畫細線和小細節。" },
+  { q: "畫靜物時，「光從哪裡來」會影響什麼？", o: ["畫紙的大小", "物體的明暗和影子", "顏料會不會乾", "畫筆的長短"], a: 1, t: "光源決定哪裡亮、哪裡暗，影子會落在光的反方向。" },
+  { q: "陶土作品放進窯裡用高溫燒，是為了什麼？", o: ["讓它變硬、變堅固", "讓它變軟", "讓它變香", "讓它變輕"], a: 0, t: "高溫燒製會讓陶土變硬，才能拿來裝東西、長久保存。" },
+  { q: "「拼貼」是什麼樣的創作方式？", o: ["只用鉛筆畫", "把紙、布等材料剪貼組合成作品", "用手指沾顏料畫", "用黏土捏"], a: 1, t: "拼貼可以用報紙、包裝紙、布料，組合出很有層次的作品。" },
+  { q: "有名的「羅浮宮」博物館在哪個城市？", o: ["倫敦", "紐約", "羅馬", "巴黎"], a: 3, t: "羅浮宮在法國巴黎，門口有一座玻璃金字塔。" },
+  { q: "草間彌生最有名的圖案是什麼？", o: ["條紋", "圓點", "格子", "愛心"], a: 1, t: "日本藝術家草間彌生最愛圓點，南瓜上也滿滿都是點點。" },
+  { q: "國立故宮博物院在哪一個城市？", o: ["台北", "台中", "台南", "高雄"], a: 0, t: "故宮在台北士林，嘉義還有一座南部院區。" },
+  { q: "一個顏色加越多白色，它的「明度」會怎樣？", o: ["越低", "不會變", "越高", "變成黑色"], a: 2, t: "明度就是明亮程度，加白變亮、加黑變暗。" },
+];
+
+async function gQuizList() {
+  const q = await fbGet("gacha/quiz");
+  const list = Array.isArray(q) ? q.filter((x) => x && x.q && Array.isArray(x.o)) : [];
+  return list.length ? list : GACHA_QUIZ;
+}
+/* 每天輪一題，大家同一天看到同一題；測試模式每答一題就換下一題 */
+function gQuizIndex(list, day, n) {
+  const d = Math.floor(Date.parse(day + "T00:00:00Z") / 86400000);
+  return (((d + (Number(n) || 0)) % list.length) + list.length) % list.length;
+}
+function gOpen(cfg, sim) {
+  const today = gDay();
+  if (sim) return;
+  if (today > cfg.end) throw Object.assign(new Error("活動已經結束囉，謝謝你的參與！"), { code: "ENDED" });
+  if (today < cfg.start) throw Object.assign(new Error(`活動 ${cfg.start.slice(5).replace("-", "/")} 才開始喔`), { code: "SOON" });
+}
+
+app.post("/gacha/quiz", async (req, res) => {
+  try {
+    const who = await gWho((req.body || {}).accessToken);
+    const out = await gSerial(async () => {
+      const cfg = await gConfig();
+      if (!(cfg.games || {}).quiz) throw Object.assign(new Error("小問答目前沒有開放"), { code: "OFF" });
+      const phone = await fbGet(`gacha/bind/${who.uid}`);
+      if (typeof phone !== "string" || !gValidPhone(phone)) throw Object.assign(new Error("請先輸入電話"), { code: "NEED_PHONE" });
+      const sim = await gSim(cfg, phone, who.uid);
+      gOpen(cfg, sim);
+      const base = sim ? "gacha/testplayers" : "gacha/players";
+      const today = gDay();
+      const [p0, list] = await Promise.all([fbGet(`${base}/${phone}`), gQuizList()]);
+      const p = p0 || {};
+      if (!sim && ((p.days || {})[today] || {}).quiz) throw Object.assign(new Error("今天已經答過囉，明天再來挑戰！"), { code: "DONE" });
+      const qi = gQuizIndex(list, today, sim ? p.quizN : 0);
+      const Q = list[qi];
+      const choice = Number((req.body || {}).choice);
+      const correct = choice === Number(Q.a);
+      if (sim) await fbPatch(`${base}/${phone}`, { quizN: (Number(p.quizN) || 0) + 1 });
+      else await fbPatch(`${base}/${phone}`, { [`days/${today}/quiz`]: { qi, c: choice, ok: correct } });
+      return { correct, a: Number(Q.a), t: Q.t || "", cfg, phone };
+    });
+    const state = await gState(out.cfg, who, out.phone);
+    res.json({ ok: true, correct: out.correct, a: out.a, t: out.t, state });
+  } catch (e) { gErr(res, e); }
+});
+
+app.post("/gacha/memory", async (req, res) => {
+  try {
+    const who = await gWho((req.body || {}).accessToken);
+    const out = await gSerial(async () => {
+      const cfg = await gConfig();
+      if (!(cfg.games || {}).memory) throw Object.assign(new Error("翻牌遊戲目前沒有開放"), { code: "OFF" });
+      const phone = await fbGet(`gacha/bind/${who.uid}`);
+      if (typeof phone !== "string" || !gValidPhone(phone)) throw Object.assign(new Error("請先輸入電話"), { code: "NEED_PHONE" });
+      const sim = await gSim(cfg, phone, who.uid);
+      gOpen(cfg, sim);
+      const today = gDay();
+      let first = true;
+      if (!sim) {
+        const d = await fbGet(`gacha/players/${phone}/days/${today}/memory`);
+        first = !d;
+        if (first) await fbPut(`gacha/players/${phone}/days/${today}/memory`, true);
+      }
+      return { first, cfg, phone };
+    });
+    const state = await gState(out.cfg, who, out.phone);
+    res.json({ ok: true, first: out.first, state });
+  } catch (e) { gErr(res, e); }
+});
+
+app.post("/staff/gacha/quiz", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const list = (req.body || {}).quiz;
+    if (!Array.isArray(list) || !list.length) throw Object.assign(new Error("題庫是空的"), { code: "BAD" });
+    const clean = list.map((x, i) => {
+      const o = (x.o || []).map((v) => String(v || "").trim());
+      if (!String(x.q || "").trim()) throw Object.assign(new Error(`第 ${i + 1} 題沒有題目`), { code: "BAD" });
+      if (o.length !== 4 || o.some((v) => !v)) throw Object.assign(new Error(`第 ${i + 1} 題要填滿 4 個選項`), { code: "BAD" });
+      const a = Number(x.a);
+      if (!(a >= 0 && a <= 3)) throw Object.assign(new Error(`第 ${i + 1} 題沒有選正確答案`), { code: "BAD" });
+      return { q: String(x.q).trim(), o, a, t: String(x.t || "").trim() };
+    });
+    await fbPut("gacha/quiz", clean);
+    res.json({ ok: true, quiz: clean });
   } catch (e) { gErr(res, e); }
 });
 
@@ -2373,7 +2570,9 @@ app.post("/staff/gacha", async (req, res) => {
       fbGet("gacha/log", { orderBy: '"$key"', limitToLast: "1500" }),
     ]);
     const saved = await fbGet("gacha/config", { shallow: "true" });
-    res.json({ ok: true, cfg, isDefault: !saved, stock: stock || {}, players: players || {}, log: log || {}, today: gDay() });
+    const qs = await fbGet("gacha/quiz", { shallow: "true" });
+    res.json({ ok: true, cfg, isDefault: !saved, stock: stock || {}, players: players || {}, log: log || {}, today: gDay(),
+      quiz: await gQuizList(), quizDefault: !qs });
   } catch (e) { gErr(res, e); }
 });
 
@@ -2477,7 +2676,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-09-30-gacha-testmode";
+const SERVER_VERSION = "2026-09-30-gacha-games";
 
 app.get("/health", async (_, res) => {
   const out = {
