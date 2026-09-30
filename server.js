@@ -2193,7 +2193,7 @@ async function gState(cfg, who, phone) {
     if (dq) Object.assign(quiz, { ok: !!dq.ok, c: dq.c, a: S.a, t: S.t });
   }
   const ticker = Object.values(logs || {})
-    .filter((l) => l && l.type !== "none")
+    .filter((l) => l && l.type !== "none" && !l.test)
     .sort((a, b) => String(b.at).localeCompare(String(a.at)))
     .slice(0, 12)
     .map((l) => ({ who: gMask(l.name), nm: l.nm, ic: l.ic, at: l.at }));
@@ -2696,16 +2696,20 @@ app.post("/staff/gacha/reset-test", async (req, res) => {
   if (!s) return;
   try {
     const cfg = await gConfig();
-    if (gDay() >= cfg.start) throw Object.assign(new Error("活動已經開始了，不能清空紀錄"), { code: "BAD" });
+    /* 活動開始之後也能按，但只清測試資料（測試模式的遊玩紀錄、標成測試的抽獎紀錄），
+       正式玩家的次數、限量獎品的數量一律不動。 */
+    const started = gDay() >= cfg.start;
     const [players, log] = await Promise.all([fbGet("gacha/players"), fbGet("gacha/log")]);
     await fbDel("gacha/testplayers");
-    await fbDel("gacha/stock");
     const pp = {};
-    for (const ph in players || {}) {
-      const p = players[ph] || {};
-      pp[ph] = { uid: p.uid || null, name: p.name || "", lineName: p.lineName || "", first: p.first || null };
+    if (!started) {
+      await fbDel("gacha/stock");
+      for (const ph in players || {}) {
+        const p = players[ph] || {};
+        pp[ph] = { uid: p.uid || null, name: p.name || "", lineName: p.lineName || "", first: p.first || null };
+      }
+      if (Object.keys(pp).length) await fbPatch("gacha/players", pp);
     }
-    if (Object.keys(pp).length) await fbPatch("gacha/players", pp);
     const lp = {};
     for (const k in log || {}) if (log[k] && log[k].test) lp[k] = null;
     if (Object.keys(lp).length) await fbPatch("gacha/log", lp);
@@ -2758,7 +2762,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-09-30-gacha-quiz62";
+const SERVER_VERSION = "2026-09-30-gacha-launch";
 
 app.get("/health", async (_, res) => {
   const out = {
