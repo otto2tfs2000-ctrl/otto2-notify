@@ -2229,7 +2229,8 @@ async function gState(cfg, who, phone) {
     quiz,
     memory: gm.memory ? { done: !sim && !!day.memory } : null,
     bears: gm.collect ? {
-      list: (cfg.bears || []).map((b) => ({ id: b.id, nm: b.nm, rare: !!b.rare })),
+      list: (cfg.bears || []).map((b) => ({ id: b.id, nm: b.nm, rare: !!b.rare, hidden: !!b.hidden })),
+      title: cfg.bearTitle || "", unit: cfg.bearUnit || "", img: cfg.bearImg || "",
       have: p.bears || {}, done: !!p.collected, reward: (cfg.collectReward || {}).nm || "",
       limit: Number(cfg.collectLimit) || 0,
       left: Number(cfg.collectLimit) ? Math.max(0, Number(cfg.collectLimit) - (Number((stock || {}).collect) || 0)) : null,
@@ -2338,7 +2339,7 @@ app.post("/gacha/spin", async (req, res) => {
       if (bToday >= bMax) {
         const bw = pool.filter((x) => x.type === "bonus").reduce((a, x) => a + (Number(x.w) || 0), 0);
         pool = pool.filter((x) => x.type !== "bonus");
-        if (bw > 0 && (cfg.games || {}).collect) pool.push({ id: "bearonly", ic: "🐻", nm: "造型小黑熊", sub: "", type: "bear", w: bw });
+        if (bw > 0 && (cfg.games || {}).collect) pool.push({ id: "bearonly", ic: "🐻", nm: cfg.bearUnit || "造型小黑熊", sub: "", type: "bear", w: bw });
       }
       if (sure) pool = pool.filter((x) => x.type !== "none");
       if (!pool.length) pool = cfg.prizes.filter((x) => x.type === "none");
@@ -2360,12 +2361,16 @@ app.post("/gacha/spin", async (req, res) => {
       const bearList = (cfg.games || {}).collect && Array.isArray(cfg.bears) ? cfg.bears : [];
       if (bearList.length) {
         const hw = (cfg.halloweenDays || []).includes(today);
-        const b = gPick(bearList.map((x) => ({ ...x, w: (Number(x.w) || 0) * (hw && x.id === "pumpkin" ? 3 : 1) })));
+        /* boostDays 那幾天（例如 10/25），boostBear 那一款機率乘 boostX */
+        const boost = (cfg.boostDays || []).includes(today) ? cfg.boostBear : null;
+        const b = gPick(bearList.map((x) => ({ ...x, w: (Number(x.w) || 0) * (hw && x.id === "pumpkin" ? 3 : 1) * (boost && x.id === boost ? (Number(cfg.boostX) || 2) : 1) })));
         const have = p.bears || {};
-        bear = { id: b.id, nm: b.nm, rare: !!b.rare, isNew: !(Number(have[b.id]) > 0) };
+        bear = { id: b.id, nm: b.nm, rare: !!b.rare, hidden: !!b.hidden, isNew: !(Number(have[b.id]) > 0) };
         patch[`bears/${b.id}`] = (Number(have[b.id]) || 0) + 1;
         const owned = new Set(Object.keys(have).filter((k) => Number(have[k]) > 0).concat(b.id));
-        if (!p.collected && bearList.every((x) => owned.has(x.id))) {
+        /* 隱藏版不算在集滿條件裡 */
+        const regular = bearList.filter((x) => !x.hidden);
+        if (!p.collected && regular.every((x) => owned.has(x.id))) {
           collect = { ...(cfg.collectReward || { type: "ticket", kind: "goods", nm: "圖鑑集滿禮" }) };
           patch.collected = true;
           /* 集滿禮限量：送完之後一樣算集滿，只是不送東西（測試模式不扣名額） */
@@ -2374,7 +2379,7 @@ app.post("/gacha/spin", async (req, res) => {
           if (lim && used2 >= lim) collect.soldOut = true;
           else if (!sim) await fbPut("gacha/stock/collect", used2 + 1);
         }
-        bear.count = owned.size; bear.total = bearList.length;
+        bear.count = regular.filter((x) => owned.has(x.id)).length; bear.total = regular.length;
       }
 
       const logRef = await fbPost("gacha/log", {
