@@ -2115,6 +2115,7 @@ async function gChances(cfg, phone, uid, day) {
   const gm = cfg.games || {};
   if (gm.quiz && day && day.quiz && day.quiz.ok) reasons.push({ why: "quiz", label: "答對今日問答" });
   if (gm.memory && day && day.memory) reasons.push({ why: "memory", label: "翻牌過關" });
+  if (day && day.dupeX) reasons.push({ why: "dupe", label: "重複公仔換 1 次" });
   if ((cfg.doubleDays || []).includes(today)) reasons.push({ why: "double", label: cfg.doubleLabel || "加碼日", sure: true });
   return reasons.slice(0, Math.max(1, Number(cfg.maxDaily) || 5));
 }
@@ -2231,7 +2232,7 @@ async function gState(cfg, who, phone) {
     bears: gm.collect ? {
       list: (cfg.bears || []).map((b) => ({ id: b.id, nm: b.nm, rare: !!b.rare, hidden: !!b.hidden })),
       title: cfg.bearTitle || "", unit: cfg.bearUnit || "", img: cfg.bearImg || "",
-      have: p.bears || {}, done: !!p.collected, reward: (cfg.collectReward || {}).nm || "",
+      have: p.bears || {}, dupes: Number(p.dupes) || 0, done: !!p.collected, reward: (cfg.collectReward || {}).nm || "",
       limit: Number(cfg.collectLimit) || 0,
       left: Number(cfg.collectLimit) ? Math.max(0, Number(cfg.collectLimit) - (Number((stock || {}).collect) || 0)) : null,
     } : null,
@@ -2367,6 +2368,13 @@ app.post("/gacha/spin", async (req, res) => {
         const have = p.bears || {};
         bear = { id: b.id, nm: b.nm, rare: !!b.rare, hidden: !!b.hidden, isNew: !(Number(have[b.id]) > 0) };
         patch[`bears/${b.id}`] = (Number(have[b.id]) || 0) + 1;
+        /* 重複的公仔湊滿 3 隻，自動換 1 次扭蛋（每天最多換 1 次），家長不用另外操作 */
+        if (have[b.id] > 0) {
+          const dupes = (Number(p.dupes) || 0) + 1;
+          const dayKey = sim ? gShiftDay(cfg.start, Object.keys(p.days || {}).length) : today;
+          if (dupes >= 3 && !((p.days || {})[dayKey] || {}).dupeX) { patch.dupes = dupes - 3; patch[`days/${dayKey}/dupeX`] = true; bear && (bear.swap = true) }
+          else patch.dupes = dupes;
+        }
         const owned = new Set(Object.keys(have).filter((k) => Number(have[k]) > 0).concat(b.id));
         /* 隱藏版不算在集滿條件裡 */
         const regular = bearList.filter((x) => !x.hidden);
