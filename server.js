@@ -2328,7 +2328,7 @@ app.get("/gacha/info", async (req, res) => {
     const cfg = await gConfig(), today = gDay();
     res.json({ ok: true, today, start: cfg.start, end: cfg.end, title: cfg.title,
       status: today < cfg.start ? "soon" : today > cfg.end ? "ended" : "on",
-      bears: (cfg.bears || []).length, img: cfg.bearImg || "", migr: !!cfg.migrPicasso1001, reset: String(cfg.migrReset1001 || "").split(" ")[0] });
+      bears: (cfg.bears || []).length, img: cfg.bearImg || "", migr: !!cfg.migrPicasso1001, reset: String(cfg.migrReset1001 || "").split(" ")[0], reset2: String(cfg.migrReset1001b || "").split(" ")[0] });
   } catch (e) { gErr(res, e); }
 });
 
@@ -2921,11 +2921,12 @@ async function gMigratePicasso1001() {
 
 /* 2026-10-01 大熊要求：把他自己今天轉過的次數歸零，讓他從頭再玩一次（只動今天那天的紀錄；
    抽到的紅利、公仔都保留）。電話不寫進公開 repo，用雜湊比對 testPhones；做過一次就不再做。 */
-async function gResetOwnerToday1001() {
+/* flag：每要重置一次就換一個新名字（大熊測試動畫要再轉，2026-10-01 晚第二次） */
+async function gResetOwnerToday1001(flag) {
   try {
     if (gDay() !== "2026-10-01") return;
     const c = await fbGet("gacha/config");
-    if (!c || typeof c !== "object" || c.migrReset1001) return;
+    if (!c || typeof c !== "object" || c[flag]) return;
     const H = "86d6d0b805decee8a25769836ccfabe4fdc008accff085d2078bc22e6f3950ef";
     const phone = (c.testPhones || []).find((ph) => crypto.createHash("sha256").update(String(ph)).digest("hex") === H);
     let note = "not-found";
@@ -2937,9 +2938,9 @@ async function gResetOwnerToday1001() {
       await fbDel(`gacha/players/${phone}/bday/${d}`);
       note = "done";
     }
-    await fbPatch("gacha/config", { migrReset1001: note + " " + new Date().toISOString() });
+    await fbPatch("gacha/config", { [flag]: note + " " + new Date().toISOString() });
     console.log("gacha: owner today reset", note);
   } catch (e) { console.error("gResetOwnerToday1001", e && e.message) }
 }
 
-app.listen(PORT, () => { console.log(`otto2-notify on ${PORT}`); gMigratePicasso1001().then(gResetOwnerToday1001) });
+app.listen(PORT, () => { console.log(`otto2-notify on ${PORT}`); gMigratePicasso1001().then(() => gResetOwnerToday1001("migrReset1001")).then(() => gResetOwnerToday1001("migrReset1001b")) });
