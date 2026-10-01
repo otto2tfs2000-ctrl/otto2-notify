@@ -1994,7 +1994,8 @@ const GACHA_DEFAULT = {
   cap: 30,                     /* 每人整個活動期間，每日扭蛋最多拿幾點紅利（集章保底另外算） */
   expiry: "2026-11-30",        /* 抽到的票券用到哪天 */
   testPhones: [],              /* 活動開始前可以先玩的電話（自己人測試用） */
-  doubleDays: ["2026-10-31"],  /* 這幾天多一次機會，而且一定中 */
+  doubleDays: ["2026-10-25"],  /* 這幾天多一次機會，而且一定中（10/25 畢卡索生日） */
+  doubleLabel: "畢卡索生日加碼",
   lotteryName: "月底大抽獎券",
   /* 會員（手上有點數或堂數）跟新朋友抽不同的獎池（2026-09-30 大熊定）：
      會員紅利 1/3/5/10、會員限定課程券；新朋友紅利 1/2/3、下次上課折抵券。
@@ -2114,7 +2115,7 @@ async function gChances(cfg, phone, uid, day) {
   const gm = cfg.games || {};
   if (gm.quiz && day && day.quiz && day.quiz.ok) reasons.push({ why: "quiz", label: "答對今日問答" });
   if (gm.memory && day && day.memory) reasons.push({ why: "memory", label: "翻牌過關" });
-  if ((cfg.doubleDays || []).includes(today)) reasons.push({ why: "double", label: "萬聖節加碼", sure: true });
+  if ((cfg.doubleDays || []).includes(today)) reasons.push({ why: "double", label: cfg.doubleLabel || "加碼日", sure: true });
   return reasons.slice(0, Math.max(1, Number(cfg.maxDaily) || 5));
 }
 
@@ -2223,6 +2224,7 @@ async function gState(cfg, who, phone) {
     prizes: gPublicPrizes(cfg, stock || {}),
     ticker,
     doubleToday: (cfg.doubleDays || []).includes(today),
+    doubleLabel: cfg.doubleLabel || "加碼日",
     halloween: (cfg.halloweenDays || []).includes(today),
     quiz,
     memory: gm.memory ? { done: !sim && !!day.memory } : null,
@@ -2451,7 +2453,7 @@ app.post("/gacha/spin", async (req, res) => {
    - 萬聖節造型：halloweenDays 那幾天扭蛋機換裝，南瓜熊比較容易出現 */
 Object.assign(GACHA_DEFAULT, {
   games: { quiz: true, memory: true, collect: true },
-  halloweenDays: ["2026-10-31"],
+  halloweenDays: [],
   bears: [
     { id: "paint",   nm: "繪畫熊", w: 20 },
     { id: "sketch",  nm: "素描熊", w: 20 },
@@ -2459,7 +2461,7 @@ Object.assign(GACHA_DEFAULT, {
     { id: "yarn",    nm: "毛線熊", w: 20 },
     { id: "crystal", nm: "水晶熊", w: 15 },
     { id: "aroma",   nm: "擴香熊", w: 15 },
-    { id: "pumpkin", nm: "南瓜熊", w: 6, rare: true },
+    { id: "picasso", nm: "畢卡索熊", w: 6, rare: true },
     { id: "gold",    nm: "金色熊", w: 4, rare: true },
   ],
   collectReward: { type: "ticket", kind: "goods", nm: "23cm 流動熊（圖鑑集滿禮）" },
@@ -2542,6 +2544,13 @@ const GACHA_QUIZ = [
   { lv: 4, q: "達文西的《蒙娜麗莎》，是畫在什麼材料上？", o: ["畫布", "白楊木板", "石牆", "銅板"], a: 1, t: "《蒙娜麗莎》畫在一塊白楊木板上，不是畫布喔！" },
   { lv: 4, q: "形容強烈明暗對比的美術名詞「Chiaroscuro」，原本是哪一國的語言？", o: ["法文", "德文", "西班牙文", "義大利文"], a: 3, t: "Chiaroscuro 是義大利文，chiaro 是亮、scuro 是暗。" },
   { lv: 4, q: "法國畫家塞尚，常被後人稱為什麼？", o: ["現代繪畫之父", "印象派之母", "立體派之王", "野獸派之父"], a: 0, t: "塞尚把物體看成圓柱、球體、圓錐，深深影響了畢卡索和後來的畫家。" },
+  /* ── 畢卡索生日週（10/25 前後，pic: true 的題目優先出）── */
+  { lv: 1, pic: true, q: "畢卡索的生日是哪一天？", o: ["10 月 25 日", "12 月 25 日", "7 月 4 日", "1 月 1 日"], a: 0, t: "畢卡索 1881 年 10 月 25 日出生，所以這天是我們的加碼日！" },
+  { lv: 1, pic: true, q: "畢卡索是哪一國人？", o: ["法國", "義大利", "西班牙", "荷蘭"], a: 2, t: "畢卡索出生在西班牙的馬拉加，後來大半輩子住在法國。" },
+  { lv: 1, pic: true, q: "立體派的畫，常常把臉畫成什麼樣子？", o: ["跟照片一模一樣", "同時看到正面和側面", "只畫輪廓不上色", "全部用圓點組成"], a: 1, t: "立體派把不同角度看到的樣子拼在同一張畫裡，所以會同時看到正面和側面。" },
+  { lv: 2, pic: true, q: "畢卡索有一段時期幾乎都用藍色作畫，叫做什麼？", o: ["藍色時期", "海洋時期", "憂鬱派", "冷色派"], a: 0, t: "藍色時期大約在 1901–1904 年，之後還有溫暖的「玫瑰時期」。" },
+  { lv: 2, pic: true, q: "跟畢卡索一起開創立體派的畫家是誰？", o: ["莫內", "布拉克", "達利", "梵谷"], a: 1, t: "畢卡索和布拉克一起發展出立體派，兩個人當時幾乎天天討論作品。" },
+  { lv: 3, pic: true, q: "畢卡索為了抗議戰爭轟炸，畫了哪一幅巨大的黑白灰作品？", o: ["《格爾尼卡》", "《亞維農的少女》", "《哭泣的女人》", "《夢》"], a: 0, t: "《格爾尼卡》寬將近 8 公尺，只用黑、白、灰，現在收藏在西班牙馬德里。" },
 ];
 
 async function gQuizList() {
@@ -2559,8 +2568,11 @@ function gHash(str) {
   return h;
 }
 function gQuizIndex(list, phone, day, asked, n) {
-  const pool = [];
+  let pool = [];
   for (let i = 0; i < list.length; i++) if (!asked.has(i)) pool.push(i);
+  /* 畢卡索生日週（10/22～10/28）優先出畢卡索題目，出完了再回到一般題庫 */
+  const md = String(day || "").slice(5);
+  if (md >= "10-22" && md <= "10-28") { const pic = pool.filter((i) => list[i] && list[i].pic); if (pic.length) pool = pic; }
   const from = pool.length ? pool : list.map((_, i) => i);
   return from[gHash(`${phone}|${day}|${Number(n) || 0}`) % from.length];
 }
@@ -2715,7 +2727,11 @@ app.post("/staff/gacha/reset-test", async (req, res) => {
     const [players, log] = await Promise.all([fbGet("gacha/players"), fbGet("gacha/log")]);
     await fbDel("gacha/testplayers");
     const pp = {};
+    let real = 0;
     if (!started) {
+      /* 還沒開始的話，抽獎紀錄全部清掉（含提前正式玩到的），跑馬燈才不會出現開始前的紀錄 */
+      real = Object.keys(log || {}).filter((k) => log[k] && !log[k].test).length;
+      await fbDel("gacha/log");
       await fbDel("gacha/stock");
       for (const ph in players || {}) {
         const p = players[ph] || {};
@@ -2726,7 +2742,7 @@ app.post("/staff/gacha/reset-test", async (req, res) => {
     const lp = {};
     for (const k in log || {}) if (log[k] && log[k].test) lp[k] = null;
     if (Object.keys(lp).length) await fbPatch("gacha/log", lp);
-    res.json({ ok: true, players: Object.keys(pp).length, logs: Object.keys(lp).length });
+    res.json({ ok: true, players: Object.keys(pp).length, logs: Object.keys(lp).length + real });
   } catch (e) { gErr(res, e); }
 });
 
