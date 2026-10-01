@@ -2294,6 +2294,16 @@ function gErr(res, e) {
   res.status(code ? 400 : 500).json({ ok: false, error: e.message, code });
 }
 
+/* 公開的活動狀態（沒有個資）：給遊樂島顯示「幾號開始」、也方便確認後台設定有沒有生效 */
+app.get("/gacha/info", async (req, res) => {
+  try {
+    const cfg = await gConfig(), today = gDay();
+    res.json({ ok: true, today, start: cfg.start, end: cfg.end, title: cfg.title,
+      status: today < cfg.start ? "soon" : today > cfg.end ? "ended" : "on",
+      bears: (cfg.bears || []).length, img: cfg.bearImg || "", migr: !!cfg.migrPicasso1001 });
+  } catch (e) { gErr(res, e); }
+});
+
 app.post("/gacha/state", async (req, res) => {
   try {
     const body = req.body || {};
