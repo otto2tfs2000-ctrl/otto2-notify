@@ -1994,6 +1994,8 @@ const GACHA_DEFAULT = {
   cap: 30,                     /* 每人整個活動期間，每日扭蛋最多拿幾點紅利（集章保底另外算） */
   expiry: "2026-11-30",        /* 抽到的票券用到哪天 */
   testPhones: [],              /* 活動開始前可以先玩的電話（自己人測試用） */
+  demoPhones: [],              /* 活動期間無限次示範（不入帳）的電話 */
+  demoStaff: true,             /* 活動期間員工名單的人自動是示範模式 */
   doubleDays: ["2026-10-25"],  /* 這幾天多一次機會，而且一定中（10/25 畢卡索生日） */
   doubleLabel: "畢卡索生日加碼",
   lotteryName: "月底大抽獎券",
@@ -2202,8 +2204,12 @@ async function gIsStaff(uid) {
   return v;
 }
 async function gSim(cfg, phone, uid) {
-  if (gDay() >= cfg.start) return false;
-  return (cfg.testPhones || []).includes(phone) || (await gIsStaff(uid));
+  const today = gDay();
+  if (today < cfg.start) return (cfg.testPhones || []).includes(phone) || (await gIsStaff(uid));
+  if (today > cfg.end) return false;
+  /* 活動期間的「示範模式」：老師示範用，無限次、不入帳（跟開始前的測試模式同一套）。
+     後台設定的示範電話，加上 demoStaff 打開時員工名單裡的人 */
+  return (cfg.demoPhones || []).includes(phone) || (cfg.demoStaff !== false && (await gIsStaff(uid)));
 }
 const gShiftDay = (d, n) => { const t = new Date(d + "T00:00:00Z"); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
 const fbDel = (path) => fetch(fbUrl(path), { method: "DELETE" });
@@ -2219,7 +2225,7 @@ async function gState(cfg, who, phone) {
   const p = pl || {};
   const today = gDay();
   const day = (p.days || {})[today] || {};
-  const reasons = sim ? [{ why: "test", label: "測試模式" }] : await gChances(cfg, phone, who.uid, day, p, m);
+  const reasons = sim ? [{ why: "test", label: gDay() < cfg.start ? "測試模式" : "示範模式" }] : await gChances(cfg, phone, who.uid, day, p, m);
   const used = sim ? Number(p.spins) || 0 : Number(day.n) || 0;
   const c = (m && m.cache) || {};
   const gm = cfg.games || {};
@@ -2360,7 +2366,7 @@ app.post("/gacha/spin", async (req, res) => {
         fbGet(`${base}/${phone}`), fbGet(`members/${phone}`), fbGet("gacha/stock"),
       ]);
       const p = pl || {};
-      const reasons = sim ? [{ why: "test", label: "測試模式" }] : await gChances(cfg, phone, who.uid, (p.days || {})[today], p, m);
+      const reasons = sim ? [{ why: "test", label: gDay() < cfg.start ? "測試模式" : "示範模式" }] : await gChances(cfg, phone, who.uid, (p.days || {})[today], p, m);
       const used = sim ? Number(p.spins) || 0 : Number((p.days || {})[today]?.n) || 0;
       if (!sim && used >= reasons.length) throw Object.assign(new Error("今天的機會用完了，明天再來轉！"), { code: "NO_CHANCE" });
       const reason = sim ? reasons[0] : reasons[used];
@@ -2435,7 +2441,7 @@ app.post("/gacha/spin", async (req, res) => {
         at: new Date().toISOString(), date: today, phone, name, uid: who.uid,
         pid: prize.id, nm: prize.nm, ic: prize.ic, type: prize.type, v: prize.v, why: reason.why,
         bear: bear ? bear.id : undefined,
-        test: today < cfg.start || undefined, sim: sim || undefined,
+        test: (sim || today < cfg.start) || undefined, sim: sim || undefined,
       });
       const gid = logRef && logRef.name;
 
@@ -2447,7 +2453,7 @@ app.post("/gacha/spin", async (req, res) => {
         await fbPost("gacha/log", {
           at: new Date().toISOString(), date: today, phone, name, uid: who.uid,
           pid: "collect", nm: `圖鑑集滿・${collect.nm}`, ic: "📖", type: collect.type || "ticket", v: Number(collect.v) || 0, why: "collect",
-          test: today < cfg.start || undefined, sim: sim || undefined,
+          test: (sim || today < cfg.start) || undefined, sim: sim || undefined,
         });
       }
 
@@ -2489,7 +2495,7 @@ app.post("/gacha/spin", async (req, res) => {
           await fbPost("gacha/log", {
             at: new Date().toISOString(), date: today, phone, name, uid: who.uid,
             pid: "ms" + ms.d, nm: `集章 ${ms.d} 天・${ms.nm}`, ic: "🏅", type: ms.type, v: Number(ms.v) || 0, why: "milestone",
-            test: today < cfg.start || undefined, sim: sim || undefined,
+            test: (sim || today < cfg.start) || undefined, sim: sim || undefined,
           });
         }
       }
@@ -2763,6 +2769,8 @@ app.post("/staff/gacha/config", async (req, res) => {
     }
     c.cap = Math.max(0, Math.round(Number(c.cap) || 0));
     c.testPhones = (c.testPhones || []).map(normPhone).filter(gValidPhone);
+    c.demoPhones = (c.demoPhones || []).map(normPhone).filter(gValidPhone);
+    c.demoStaff = c.demoStaff !== false;
     c.updatedAt = new Date().toISOString();
     c.updatedBy = (s.staff && s.staff.name) || s.uid;
     await fbPut("gacha/config", c);
