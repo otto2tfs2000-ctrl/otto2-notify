@@ -2130,10 +2130,30 @@ function gPublicPrizes(cfg, stock) {
   }));
 }
 
+/* 扭蛋綁的電話順便寫回會員檔案（2026-10-01）。
+   後台登記預約要推通知，看的是 members/{phone}/lineUserId；以前扭蛋只記在
+   gacha/bind，家長綁了電話、後台約課還是收不到通知，活動的目的就落空了。
+   跟 /liff/member 同一套規矩：會員檔案已經綁了別的 LINE 就不動、
+   沒有這個會員也不新建。同一個 LINE 這次開機後只檢查一次。 */
+const gLinked = new Set();
+async function gLinkMember(uid, phone) {
+  if (!uid || !phone || gLinked.has(uid)) return;
+  gLinked.add(uid);
+  try {
+    const idx = await fbGet(`lineIndex/${uid}`);
+    if (!idx) await fbPut(`lineIndex/${uid}`, phone);
+    const m = await fbGet(`members/${phone}`);
+    if (m && !m.lineUserId) await fbPatch(`members/${phone}`, { lineUserId: uid });
+  } catch (e) {
+    gLinked.delete(uid);
+    console.error("gLinkMember", e.message);
+  }
+}
+
 /* 找出這個 LINE 帳號綁的電話；還沒綁的話，身上帶了電話就綁上去 */
 async function gResolvePhone(who, body) {
   let phone = await fbGet(`gacha/bind/${who.uid}`);
-  if (typeof phone === "string" && gValidPhone(phone)) return { phone };
+  if (typeof phone === "string" && gValidPhone(phone)) { gLinkMember(who.uid, phone); return { phone }; }
   const want = normPhone(body.phone || "");
   if (!want) {
     /* 預約頁以前記過的電話，拿來預先填好 */
@@ -2155,6 +2175,7 @@ async function gResolvePhone(who, body) {
     lineName: who.displayName || "",
     first: (pl && pl.first) || new Date().toISOString(),
   });
+  gLinkMember(who.uid, want);
   return { phone: want };
 }
 
