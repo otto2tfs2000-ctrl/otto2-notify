@@ -1988,7 +1988,7 @@ app.get("/auth/ping", (_, res) => {
 const GACHA_CHANNEL = process.env.GACHA_CHANNEL_ID || String(LIFF_URL.match(/(\d{8,})-/)?.[1] || "2010906803");
 
 const GACHA_DEFAULT = {
-  title: "十月黑熊扭蛋",
+  title: "世界藝術日・畢卡索扭扭樂",
   start: "2026-10-03",
   end: "2026-10-31",
   cap: 30,                     /* 每人整個活動期間，每日扭蛋最多拿幾點紅利（集章保底另外算） */
@@ -2041,7 +2041,10 @@ const fbPost = async (path, value) =>
 async function gConfig() {
   const c = await fbGet("gacha/config");
   if (!c || typeof c !== "object" || !Array.isArray(c.prizes)) return GACHA_DEFAULT;
-  return { ...GACHA_DEFAULT, ...c };
+  const cfg = { ...GACHA_DEFAULT, ...c };
+  /* 十月改成畢卡索季：後台名稱還是舊的「黑熊」時，一律用新名稱（畫面、紅利明細都是） */
+  if (cfg.bearTitle && /黑熊/.test(cfg.title || "")) cfg.title = "世界藝術日・畢卡索扭扭樂";
+  return cfg;
 }
 
 /* 一次只讓一個人抽——限量獎品的庫存、同一個人連點兩下，
