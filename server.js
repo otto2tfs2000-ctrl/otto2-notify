@@ -2099,9 +2099,16 @@ function gIsMember(m) {
 }
 
 /* 今天有幾次機會、每一次是因為什麼 */
-async function gChances(cfg, phone, uid, day) {
+async function gChances(cfg, phone, uid, day, p, m) {
   const today = gDay(), todaySlash = todayStr();
   const reasons = [{ why: "daily", label: "每日一次" }];
+  /* 登錄禮（10/1–10/14）：第一次登錄電話的人送 1 次，會員必中、新朋友一般；
+     放在第 2 格，用掉那天記在 players.welcome，當天整天都還在（次數才不會亂掉），隔天起就沒有了 */
+  const wEnd = cfg.welcomeEnd || "2026-10-14";
+  if (p && today <= wEnd && (!p.welcome || p.welcome === today)) {
+    const mem = gIsMember(m);
+    reasons.push(mem ? { why: "welcome", label: "會員登錄禮（必中）", sure: true } : { why: "welcome", label: "新朋友登錄禮" });
+  }
   const all = await gBookings();
   let cls = false, book = false;
   for (const k in all) {
@@ -2212,7 +2219,7 @@ async function gState(cfg, who, phone) {
   const p = pl || {};
   const today = gDay();
   const day = (p.days || {})[today] || {};
-  const reasons = sim ? [{ why: "test", label: "測試模式" }] : await gChances(cfg, phone, who.uid, day);
+  const reasons = sim ? [{ why: "test", label: "測試模式" }] : await gChances(cfg, phone, who.uid, day, p, m);
   const used = sim ? Number(p.spins) || 0 : Number(day.n) || 0;
   const c = (m && m.cache) || {};
   const gm = cfg.games || {};
@@ -2353,7 +2360,7 @@ app.post("/gacha/spin", async (req, res) => {
         fbGet(`${base}/${phone}`), fbGet(`members/${phone}`), fbGet("gacha/stock"),
       ]);
       const p = pl || {};
-      const reasons = sim ? [{ why: "test", label: "測試模式" }] : await gChances(cfg, phone, who.uid, (p.days || {})[today]);
+      const reasons = sim ? [{ why: "test", label: "測試模式" }] : await gChances(cfg, phone, who.uid, (p.days || {})[today], p, m);
       const used = sim ? Number(p.spins) || 0 : Number((p.days || {})[today]?.n) || 0;
       if (!sim && used >= reasons.length) throw Object.assign(new Error("今天的機會用完了，明天再來轉！"), { code: "NO_CHANCE" });
       const reason = sim ? reasons[0] : reasons[used];
@@ -2463,6 +2470,9 @@ app.post("/gacha/spin", async (req, res) => {
       const simDays = Object.keys(p.days || {}).length;
       if (sim) { patch.spins = used + 1; patch[`days/${gShiftDay(cfg.start, simDays)}/n`] = 1; }
       else patch[`days/${today}/n`] = used + 1;
+      /* 轉到登錄禮那一格（或更後面）就算用掉了；今天剛開始送的時候已經轉過好幾次的人也一樣 */
+      const wi = reasons.findIndex((r) => r.why === "welcome");
+      if (!sim && wi >= 0 && used >= wi && !p.welcome) patch.welcome = today;
 
       /* 集章：今天第一次玩才算新的一天，達標就發保底（不佔紅利上限） */
       let milestone = null;
