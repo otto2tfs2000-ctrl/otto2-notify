@@ -2850,4 +2850,32 @@ app.get("/health", async (_, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`otto2-notify on ${PORT}`));
+/* 2026-10-01 一次性：扭蛋改成畢卡索季並提前今天開始（大熊決定）。
+   後台 Chrome 操作暫時連不上，改由伺服器開機時寫一次設定；寫過會記 migr 旗標，不會重複。
+   只動這幾個欄位，其他設定（獎品、機率、上限、測試名單）維持後台原本的。 */
+async function gMigratePicasso1001() {
+  try {
+    const c = await fbGet("gacha/config");
+    if (!c || typeof c !== "object" || !Array.isArray(c.prizes)) return;
+    if (c.migrPicasso1001) return;
+    const next = {
+      ...c,
+      start: "2026-10-01",
+      title: "世界藝術日・畢卡索扭扭樂",
+      doubleDays: ["2026-10-25"], doubleLabel: "畢卡索生日加碼", halloweenDays: [],
+      bears: [
+        { id: "p01", nm: "經典條紋", w: 170 }, { id: "p02", nm: "和平鴿", w: 170 }, { id: "p06", nm: "花冠少年", w: 170 },
+        { id: "p05", nm: "藍色吉他", w: 120 }, { id: "p03", nm: "哭泣的女人", w: 120 }, { id: "p04", nm: "自畫像", w: 120 },
+        { id: "p07", nm: "彩色劍客", w: 50, rare: true }, { id: "p08", nm: "幾何面具", w: 50, rare: true },
+        { id: "hbear", nm: "黑熊畢卡索", w: 20, rare: true, hidden: true }, { id: "hgold", nm: "金色和平鴿", w: 10, rare: true, hidden: true },
+      ],
+      bearTitle: "畢卡索圖鑑", bearUnit: "畢卡索公仔", bearImg: "gacha/picasso2/",
+      boostDays: ["2026-10-25"], boostBear: "hgold", boostX: 2,
+      migrPicasso1001: new Date().toISOString(), updatedAt: new Date().toISOString(), updatedBy: "畢卡索季設定（自動）",
+    };
+    await fbPut("gacha/config", next);
+    console.log("gacha config: Picasso season applied, start 2026-10-01");
+  } catch (e) { console.error("gMigratePicasso1001", e && e.message) }
+}
+
+app.listen(PORT, () => { console.log(`otto2-notify on ${PORT}`); gMigratePicasso1001() });
