@@ -3525,6 +3525,7 @@ app.post("/staff/xmas/reset-test", async (req, res) => {
          island/album/{wid} = {title,date,by,ts}
    ══════════════════════════════════════════════════════════ */
 const ISL_STYLES = ["stack", "wing"];
+const ISL_MAX = Number(process.env.ISLAND_MAX) || 58;
 const islErr = (msg, code) => Object.assign(new Error(msg), { code });
 let islCache = { at: 0, data: null };
 const islDirty = () => { islCache = { at: 0, data: null }; };
@@ -3617,6 +3618,9 @@ app.post("/island/join", async (req, res) => {
     if (typeof had === "string") return res.json({ ok: true, house: had, existed: true });
     const name = String(body.name || "").trim().slice(0, 8);
     if (!name) throw islErr("請寫一個門牌名字", "NO_NAME");
+    /* 島上目前蓋得下 58 間（art.html 的 HSPOTS），住滿就先擋下，免得房子疊在一起 */
+    const all = await fbGet("island/houses", { shallow: "true" });
+    if (all && Object.keys(all).length >= ISL_MAX) throw islErr("作品島目前住滿了，我們正在擴建，請私訊小編登記", "FULL");
     const style = ISL_STYLES.includes(body.style) ? body.style : "stack";
     const hid = "h" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     await fbPut(`island/houses/${hid}`, { phone, uid: who.uid, name, style, since: Number(String(gDay()).slice(0, 4)), ts: Date.now(), works: {} });
