@@ -3512,6 +3512,181 @@ app.post("/staff/xmas/reset-test", async (req, res) => {
   } catch (e) { gErr(res, e); }
 });
 
+/* ══════════════════════════════════════════════════════════
+   作品島（2026-10-02，大熊定的規則）
+   - 大家都可以逛：GET /island/data 公開，只給名字、作品，不給電話、LINE
+   - 只有會員可以搬進來、上傳；每支電話一間小屋，只能放進自己家
+   - 員工（後台員工名單）可以幫任何一間放作品，也可以放大樹相簿
+   照片不放在 island/houses 裡（薪資系統 base64 拖慢開頁的教訓）：
+   另外存在 island/img/{id}/{f|t}，大圖長邊 1280、縮圖 360，
+   透過 /island/img/{id}/{f|t} 給瀏覽器，一年快取，伺服器也記住最近的縮圖。
+   資料：island/houses/{hid} = {phone, uid, name, style, since, ts, works:{wid:{title,date,by,ts}}}
+         island/owner/{phone} = hid
+         island/album/{wid} = {title,date,by,ts}
+   ══════════════════════════════════════════════════════════ */
+const ISL_STYLES = ["stack", "wing"];
+const islErr = (msg, code) => Object.assign(new Error(msg), { code });
+let islCache = { at: 0, data: null };
+const islDirty = () => { islCache = { at: 0, data: null }; };
+
+async function islWho(body) {
+  const who = await gWho(body.accessToken);
+  const staff = await gIsStaff(who.uid);
+  /* 先找這個 LINE 綁過的電話：扭蛋綁定 → 預約頁記過的 */
+  let phone = await fbGet(`gacha/bind/${who.uid}`);
+  if (!(typeof phone === "string" && gValidPhone(phone))) {
+    phone = await fbGet(`lineIndex/${who.uid}`);
+    if (!(typeof phone === "string" && gValidPhone(phone))) phone = "";
+  }
+  return { who, staff, phone };
+}
+
+/* 會員：手上有點數／堂數／票券；或曾經買過方案、儲過值（ledger 有紀錄，扭蛋紅利不算） */
+function islIsMember(m) {
+  if (!m) return false;
+  if (gIsMember(m)) return true;
+  let l = m.ledger || [];
+  if (!Array.isArray(l)) l = Object.values(l);
+  return l.some((x) => x && x.src !== "gacha" && (x.type === "points" || x.type === "sessions") && Number(x.delta) > 0);
+}
+
+function islPublic(raw) {
+  const houses = Object.entries(raw.houses || {}).filter(([, h]) => h && h.name).map(([id, h]) => ({
+    id, name: h.name, style: h.style, since: h.since, ts: h.ts || 0,
+    works: Object.entries(h.works || {}).map(([wid, w]) => ({ id: wid, title: w.title || "", date: w.date || "", by: w.by || "", ts: w.ts || 0 }))
+      .sort((a, b) => a.ts - b.ts),
+  })).sort((a, b) => a.ts - b.ts);
+  const album = Object.entries(raw.album || {}).map(([wid, w]) => ({ id: wid, title: w.title || "", date: w.date || "", ts: w.ts || 0 }))
+    .sort((a, b) => a.ts - b.ts);
+  return { houses, album };
+}
+async function islData() {
+  if (islCache.data && Date.now() - islCache.at < 20000) return islCache.data;
+  const [houses, album] = await Promise.all([fbGet("island/houses"), fbGet("island/album")]);
+  islCache = { at: Date.now(), data: islPublic({ houses, album }) };
+  return islCache.data;
+}
+
+app.get("/island/data", async (req, res) => {
+  try { res.set("Cache-Control", "no-store"); res.json({ ok: true, ...(await islData()) }); } catch (e) { gErr(res, e); }
+});
+
+/* 照片：縮圖記在記憶體（最多 400 張），大圖每次跟資料庫拿，瀏覽器快取一年 */
+const islThumbs = new Map();
+app.get("/island/img/:id/:s", async (req, res) => {
+  try {
+    const id = String(req.params.id), s = req.params.s === "f" ? "f" : "t";
+    if (!/^[\w-]{6,40}$/.test(id)) return res.sendStatus(404);
+    let data = s === "t" ? islThumbs.get(id) : null;
+    if (!data) {
+      data = await fbGet(`island/img/${id}/${s}`);
+      if (typeof data !== "string" || !data.startsWith("data:image/jpeg;base64,")) return res.sendStatus(404);
+      if (s === "t") { islThumbs.set(id, data); if (islThumbs.size > 400) islThumbs.delete(islThumbs.keys().next().value); }
+    }
+    res.set("Content-Type", "image/jpeg");
+    res.set("Cache-Control", "public, max-age=31536000, immutable");
+    res.send(Buffer.from(data.slice(23), "base64"));
+  } catch (e) { res.sendStatus(500); }
+});
+
+/* 我是誰：有沒有小屋、是不是會員、是不是員工 */
+app.post("/island/me", async (req, res) => {
+  try {
+    const { who, staff, phone } = await islWho(req.body || {});
+    let hid = phone ? await fbGet(`island/owner/${phone}`) : null;
+    const m = phone ? await fbGet(`members/${phone}`) : null;
+    res.json({ ok: true, staff, house: typeof hid === "string" ? hid : null, member: islIsMember(m), hasPhone: !!phone,
+      lineName: who.displayName, suggest: (m && m.name) || "" });
+  } catch (e) { gErr(res, e); }
+});
+
+/* 搬進來：只有會員；一支電話一間 */
+app.post("/island/join", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { who, phone: bound } = await islWho(body);
+    let phone = bound;
+    if (!phone) {
+      phone = normPhone(body.phone || "");
+      if (!gValidPhone(phone)) throw islErr("請輸入上課登記的手機號碼（09 開頭 10 碼）", "BAD_PHONE");
+    }
+    const m = await fbGet(`members/${phone}`);
+    if (!islIsMember(m)) throw islErr("作品島目前只開放給 OTTO2 會員。如果你是會員卻搬不進來，請私訊小編", "NOT_MEMBER");
+    if (m.lineUserId && m.lineUserId !== who.uid) throw islErr("這支電話已經綁定另一個 LINE 帳號。如果是你本人，請私訊小編幫你處理", "PHONE_TAKEN");
+    const had = await fbGet(`island/owner/${phone}`);
+    if (typeof had === "string") return res.json({ ok: true, house: had, existed: true });
+    const name = String(body.name || "").trim().slice(0, 8);
+    if (!name) throw islErr("請寫一個門牌名字", "NO_NAME");
+    const style = ISL_STYLES.includes(body.style) ? body.style : "stack";
+    const hid = "h" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    await fbPut(`island/houses/${hid}`, { phone, uid: who.uid, name, style, since: Number(String(gDay()).slice(0, 4)), ts: Date.now(), works: {} });
+    await fbPut(`island/owner/${phone}`, hid);
+    if (!bound) await fbPut(`lineIndex/${who.uid}`, phone);
+    gLinkMember(who.uid, phone);
+    islDirty();
+    res.json({ ok: true, house: hid });
+  } catch (e) { gErr(res, e); }
+});
+
+/* 上傳：會員只能放自己家；員工可以放任何一間或大樹相簿。一個人一天最多 30 張 */
+const islDaily = new Map();
+app.post("/island/upload", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { who, staff, phone } = await islWho(body);
+    const f = String(body.full || ""), t = String(body.thumb || "");
+    const okImg = (s, max) => s.startsWith("data:image/jpeg;base64,") && s.length < max;
+    if (!okImg(f, 900000) || !okImg(t, 120000)) throw islErr("照片格式不對，請換一張再試", "BAD_IMG");
+    const dk = who.uid + "|" + gDay(), n = (islDaily.get(dk) || 0) + 1;
+    if (n > 30 && !staff) throw islErr("今天上傳很多了，明天再繼續放吧", "TOO_MANY");
+    let path;
+    if (body.target === "album") {
+      if (!staff) throw islErr("只有老師可以放大樹相簿", "NOT_STAFF");
+      path = "island/album";
+    } else {
+      const mine = phone ? await fbGet(`island/owner/${phone}`) : null;
+      const hid = String(body.target || "") || mine;
+      if (!hid || typeof hid !== "string") throw islErr("先搬進你的小屋，才能放作品", "NO_HOUSE");
+      if (hid !== mine && !staff) throw islErr("只能把作品放進自己的小屋", "NOT_YOURS");
+      const h = await fbGet(`island/houses/${hid}/name`);
+      if (!h) throw islErr("找不到這間小屋", "NO_HOUSE");
+      path = `island/houses/${hid}/works`;
+    }
+    const wid = "w" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    await fbPut(`island/img/${wid}`, { f, t });
+    const d = gDay();
+    await fbPut(`${path}/${wid}`, { title: String(body.title || "").trim().slice(0, 30), date: d.slice(0, 7).replace("-", "/"),
+      by: body.target === "album" ? "老師" : (staff && body.target ? "老師" : "本人"), uid: who.uid, ts: Date.now() });
+    islDaily.set(dk, n);
+    if (islDaily.size > 5000) islDaily.clear();
+    islDirty();
+    res.json({ ok: true, id: wid });
+  } catch (e) { gErr(res, e); }
+});
+
+/* 刪作品：自己家的、或員工 */
+app.post("/island/delete", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { staff, phone } = await islWho(body);
+    const wid = String(body.id || "");
+    if (!/^w[\w]{4,30}$/.test(wid)) throw islErr("找不到這張照片", "BAD_ID");
+    let path = null;
+    if (body.album) { if (!staff) throw islErr("只有老師可以刪大樹相簿", "NOT_STAFF"); path = `island/album/${wid}`; }
+    else {
+      const mine = phone ? await fbGet(`island/owner/${phone}`) : null;
+      const hid = String(body.house || "");
+      if (!hid || (hid !== mine && !staff)) throw islErr("只能刪自己小屋裡的作品", "NOT_YOURS");
+      path = `island/houses/${hid}/works/${wid}`;
+    }
+    await fbDel(path);
+    await fbDel(`island/img/${wid}`);
+    islThumbs.delete(wid);
+    islDirty();
+    res.json({ ok: true });
+  } catch (e) { gErr(res, e); }
+});
+
 const PORT = process.env.PORT || 3000;
 /* 2026-10-01 一次性：扭蛋改成畢卡索季並提前今天開始（大熊決定）。
    後台 Chrome 操作暫時連不上，改由伺服器開機時寫一次設定；寫過會記 migr 旗標，不會重複。
