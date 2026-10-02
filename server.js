@@ -3425,6 +3425,79 @@ app.post("/xmas/gacha", async (req, res) => {
 });
 
 
+
+/* ── 後台：聖誕走格子 ── */
+app.post("/staff/xmas", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const [cfg, saved, players, tree, forest, lots, stock] = await Promise.all([
+      xConfig(), fbGet("xmas/config", { shallow: "true" }), fbGet("xmas/players"), fbGet("xmas/world/tree"),
+      fbGet("xmas/world/forest"), fbGet("xmas/world/lots"), fbGet("xmas/stock"),
+    ]);
+    const list = Object.entries(players || {}).map(([phone, p]) => ({
+      phone, name: p.name || "", gifts: Number(p.gifts) || 0, lights: Number(p.lights) || 0, pts: Number(p.pts) || 0,
+      layers: Object.keys(p.layers || {}).length, ornRounds: Number(p.ornRounds) || 0, tree: p.tree ? p.tree.lv : 0, lot: p.lot,
+      tickets: Object.keys(p.tickets || {}).length, day: p.day || "",
+    })).sort((a, b) => b.pts - a.pts || b.lights - a.lights);
+    res.json({ ok: true, cfg, isDefault: !saved, today: gDay(), tree: tree || { lights: 0 },
+      stats: { players: list.length, pts: list.reduce((a, b) => a + b.pts, 0), trees: Object.keys(forest || {}).length, lots: Object.keys(lots || {}).length },
+      stock: stock || {}, players: list.slice(0, 300) });
+  } catch (e) { gErr(res, e); }
+});
+app.post("/staff/xmas/config", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const c = (req.body || {}).cfg || {};
+    const num = (v, d, min, max) => Math.max(min, Math.min(max, Math.round(Number(v)) || d));
+    const out = {
+      start: /^\d{4}-\d{2}-\d{2}$/.test(c.start || "") ? c.start : XMAS_DEFAULT.start,
+      end: /^\d{4}-\d{2}-\d{2}$/.test(c.end || "") ? c.end : XMAS_DEFAULT.end,
+      expiry: /^\d{4}-\d{2}-\d{2}$/.test(c.expiry || "") ? c.expiry : XMAS_DEFAULT.expiry,
+      testPhones: (c.testPhones || []).map(normPhone).filter(gValidPhone),
+      demoStaff: c.demoStaff !== false,
+      pointCap: num(c.pointCap, 20, 0, 500),
+      layers: (Array.isArray(c.layers) && c.layers.length === 5 ? c.layers : XMAS_DEFAULT.layers).map((x, i) => num(x, XMAS_DEFAULT.layers[i], 1, 100000)),
+      treePts: (Array.isArray(c.treePts) && c.treePts.length === 5 ? c.treePts : XMAS_DEFAULT.treePts).map((x, i) => num(x, XMAS_DEFAULT.treePts[i], 0, 100)),
+      ornGift: num(c.ornGift, 5, 0, 100), ornPoint: num(c.ornPoint, 3, 0, 100),
+      ornTicket: { nm: String((c.ornTicket || {}).nm || "材料升級券").slice(0, 20), kind: String((c.ornTicket || {}).kind || "upgrade").slice(0, 12) },
+      gachaDayMax: num(c.gachaDayMax, 3, 1, 20), gachaRealDay: num(c.gachaRealDay, 1, 0, 10),
+      giftGainDay: num(c.giftGainDay, 60, 0, 1000), lightsDay: num(c.lightsDay, 80, 0, 1000),
+      plantDayMax: num(c.plantDayMax, 4, 1, 50), visitDayMax: num(c.visitDayMax, 10, 0, 100),
+      daily: [num((c.daily || [])[0], 1, 1, 20), num((c.daily || [])[1], 1, 0, 20)],
+    };
+    const pool = Array.isArray(c.gachaPool) ? c.gachaPool : XMAS_DEFAULT.gachaPool;
+    const ids = new Set();
+    out.gachaPool = pool.map((x) => {
+      if (!x.id || !x.nm) throw Object.assign(new Error("每個獎品都要有名稱"), { code: "BAD" });
+      if (ids.has(x.id)) throw Object.assign(new Error("獎品編號重複：" + x.id), { code: "BAD" });
+      ids.add(x.id);
+      if (!["gift", "bonus", "ticket"].includes(x.type)) throw Object.assign(new Error("獎品類型不對：" + x.nm), { code: "BAD" });
+      const r = { id: String(x.id).slice(0, 12), nm: String(x.nm).slice(0, 24), type: x.type, w: Math.max(0, Number(x.w) || 0) };
+      if (x.type === "gift") r.n = num(x.n, 1, 1, 50);
+      if (x.type === "bonus") r.v = num(x.v, 1, 1, 100);
+      if (x.type === "ticket") { r.kind = String(x.kind || "upgrade").slice(0, 12); if (x.qty !== "" && x.qty != null) r.qty = num(x.qty, 0, 0, 100000); }
+      return r;
+    });
+    if (!out.gachaPool.some((x) => x.type === "gift" && x.w > 0)) throw Object.assign(new Error("獎池至少要有一個會抽到的禮物"), { code: "BAD" });
+    out.updatedAt = new Date().toISOString();
+    out.updatedBy = (s.staff && s.staff.name) || s.uid;
+    await fbPut("xmas/config", out);
+    res.json({ ok: true, cfg: { ...XMAS_DEFAULT, ...out } });
+  } catch (e) { gErr(res, e); }
+});
+/* 清掉示範資料（員工測試用的 testplayers／testworld），正式玩家與正式森林、小屋、樹不動 */
+app.post("/staff/xmas/reset-test", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    await fbDel("xmas/testplayers");
+    await fbDel("xmas/testworld");
+    res.json({ ok: true });
+  } catch (e) { gErr(res, e); }
+});
+
 const PORT = process.env.PORT || 3000;
 /* 2026-10-01 一次性：扭蛋改成畢卡索季並提前今天開始（大熊決定）。
    後台 Chrome 操作暫時連不上，改由伺服器開機時寫一次設定；寫過會記 migr 旗標，不會重複。
