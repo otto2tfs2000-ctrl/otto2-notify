@@ -2898,21 +2898,46 @@ app.get("/health", async (_, res) => {
   res.json(out);
 });
 
-/* ───────── 聖誕走格子（11–12 月）第 1 階段：進度存雲端 ─────────
+/* ───────── 聖誕走格子（11–12 月）─────────
    資料放在 xmas/（跟 gacha/ 完全分開）：
-     xmas/config                設定（開始結束日、示範電話…），沒設就用 XMAS_DEFAULT
+     xmas/config                設定（開始結束日、獎勵、獎池…），沒設就用 XMAS_DEFAULT
      xmas/players/{phone}       正式玩家進度
-     xmas/testplayers/{phone}   示範模式（員工、示範電話）的進度，跟正式的分開
+     xmas/world/{tree,forest,lots}   全體共用：聖誕樹點燈數、森林（每人一棵）、空地小屋
+     xmas/stock                 限量票券的發放數
+     xmas/testplayers、xmas/testworld   示範模式（員工、示範電話）用，跟正式的完全分開
    身分沿用扭蛋：LINE access token → gWho；電話綁定 → gResolvePhone（同一個 gacha/bind）。
-   這一階段只管：骰子次數、禮物、吊飾、位置、小遊戲最高分。
-   紅利、票券入帳、全體共用的樹／森林／小屋是第 2、3 階段，這裡完全不碰會員的點數。 */
+   紅利、票券寫進會員檔案，格式跟扭蛋一樣（src:"gacha"，後台判斷會員時會排除），by 標「聖誕走格子」。
+   示範模式一律不入帳（不寫紅利、不寫票券、不扣庫存）。 */
 const XMAS_DEFAULT = {
   start: "2026-11-01", end: "2026-12-25",
   testPhones: [], demoStaff: true,
-  tiles: [34, 16],          // 第一層、第二層格數
-  daily: [1, 1],            // 每層每天可擲次數
-  maxExtraDay: 5,           // 「再擲一次」每天最多加幾次
-  giftGainMax: 15,          // 一次存檔最多增加幾個禮物（防亂送）
+  tiles: [34, 16],                       // 第一層、第二層格數
+  daily: [1, 1],                         // 每層每天可擲次數
+  maxExtraDay: 5,                        // 「再擲一次」每天最多加幾次
+  giftGainDay: 60,                       // 每人每天最多靠存檔增加幾個禮物（防亂送）
+  // 聖誕樹
+  layers: [150, 400, 700, 1050, 1500],   // 每層累積幾盞燈
+  lights: { open: 1, roll: 3, gift: 10, klass: 10 },
+  lightsDay: 80,                         // 每人每天最多點幾盞
+  treePts: [2, 2, 2, 2, 5],              // 每層亮起，參與過的會員各領幾點紅利
+  // 全體共用森林／小屋
+  forestMax: 251, plantDayMax: 4,
+  lotIdx: [1, 5, 11, 17, 20, 30, 32], lotCost: 3, lotUpg: [0, 4, 6], lotMax: 1, visitDayMax: 10,
+  // 吊飾集滿（三選一）
+  ornGift: 5, ornPoint: 3, ornTicket: { nm: "材料升級券", kind: "upgrade" },
+  // 每人整個活動從走格子拿到的紅利總上限
+  pointCap: 20,
+  expiry: "2026-12-31",
+  // 扭蛋機格獎池
+  gachaDayMax: 3, gachaRealDay: 1,
+  gachaPool: [
+    { id: "g1", nm: "1 個禮物", type: "gift", n: 1, w: 560 },
+    { id: "g2", nm: "2 個禮物", type: "gift", n: 2, w: 250 },
+    { id: "g3", nm: "3 個禮物", type: "gift", n: 3, w: 100 },
+    { id: "b1", nm: "紅利 1 點", type: "bonus", v: 1, w: 60 },
+    { id: "b2", nm: "紅利 2 點", type: "bonus", v: 2, w: 20 },
+    { id: "t1", nm: "材料升級券", type: "ticket", kind: "upgrade", w: 10, qty: 30 },
+  ],
 };
 async function xConfig() {
   const c = await fbGet("xmas/config");
@@ -2923,35 +2948,52 @@ async function xSim(cfg, phone, uid) {
 }
 const xStatus = (cfg, today, sim) => (today < cfg.start ? (sim ? "test" : "soon") : today > cfg.end ? "ended" : "on");
 const xBase = (sim) => (sim ? "xmas/testplayers" : "xmas/players");
+const xWorld = (sim) => (sim ? "xmas/testworld" : "xmas/world");
+const xErr = (msg, code) => Object.assign(new Error(msg), { code });
 
-/* 今天或之後有沒有預約（沒取消的）→ 可以玩第二層 */
-async function xBooked(phone, uid) {
+/* 今天或之後有沒有預約（沒取消的）→ 可以玩第二層；今天有沒有來上課 */
+async function xBookInfo(phone, uid) {
   const todaySlash = todayStr();
   const all = await gBookings();
+  let booked = false, klass = false;
   for (const k in all) {
     const b = all[k];
     if (!b || b.status === "cancelled" || !ownsBooking(b, phone, uid)) continue;
-    if (String(b.date || "") >= todaySlash) return true;
+    if (String(b.date || "") >= todaySlash) booked = true;
+    if (b.date === todaySlash && (b.checkout || b.attend === "in")) klass = true;
   }
-  return false;
+  return { booked, klass };
 }
 
-/* 玩家資料整理成固定格式；新的一天把今天的次數歸零 */
-function xNorm(p, cfg, today) {
+/* 玩家資料整理成固定格式；新的一天把今天的計數歸零 */
+function xNorm(p, today) {
   p = p && typeof p === "object" ? p : {};
   const same = p.day === today;
-  const arr2 = (a, d) => [Number(a && a[0]) || d, Number(a && a[1]) || d];
+  const arr2 = (a) => [Number(a && a[0]) || 0, Number(a && a[1]) || 0];
   const orn = Array.isArray(p.orn) ? p.orn : [];
+  const dayN = (o) => (o && o.day === today ? Number(o.n) || 0 : 0);
   return {
     uid: p.uid || "", name: p.name || "", first: p.first || "",
     gifts: Math.max(0, Math.floor(Number(p.gifts) || 0)),
     orn: [0, 1, 2, 3].map((i) => !!orn[i]),
     pos: [Math.max(0, Math.floor(Number(p.pos && p.pos[0]) || 0)), Math.max(0, Math.floor(Number(p.pos && p.pos[1]) || 0))],
     day: today,
-    used: same ? arr2(p.used, 0) : [0, 0],
-    extra: same ? arr2(p.extra, 0) : [0, 0],
+    used: same ? arr2(p.used) : [0, 0],
+    extra: same ? arr2(p.extra) : [0, 0],
     arc: p.arc && typeof p.arc === "object" ? p.arc : { best: {}, n: 0, day: today },
     lights: Math.max(0, Math.floor(Number(p.lights) || 0)),
+    openDay: p.openDay || "", classDay: p.classDay || "",
+    layers: p.layers && typeof p.layers === "object" ? p.layers : {},
+    pts: Number(p.pts) || 0, ornRounds: Number(p.ornRounds) || 0, ornReal: Number(p.ornReal) || 0,
+    tickets: p.tickets && typeof p.tickets === "object" ? p.tickets : {},
+    tree: p.tree && Number.isFinite(Number(p.tree.s)) ? { s: Number(p.tree.s), lv: Math.max(1, Math.min(5, Number(p.tree.lv) || 1)) } : null,
+    lot: Number.isFinite(Number(p.lot)) && p.lot !== null && p.lot !== "" ? Number(p.lot) : null,
+    plantN: dayN(p.plantD), plantD: { day: today, n: dayN(p.plantD) },
+    gachaN: dayN(p.gachaD), gachaD: { day: today, n: dayN(p.gachaD) },
+    gachaReal: dayN(p.gachaRealD), gachaRealD: { day: today, n: dayN(p.gachaRealD) },
+    giftGain: dayN(p.giftGainD), giftGainD: { day: today, n: dayN(p.giftGainD) },
+    lightDay: dayN(p.lightD), lightD: { day: today, n: dayN(p.lightD) },
+    visitD: p.visitD && p.visitD.day === today && p.visitD.set ? p.visitD : { day: today, set: {}, n: 0 },
   };
 }
 const xLeft = (p, cfg, booked, sim, lv) => {
@@ -2959,21 +3001,86 @@ const xLeft = (p, cfg, booked, sim, lv) => {
   const base = lv === 0 ? Number(cfg.daily[0]) || 1 : booked ? Number(cfg.daily[1]) || 1 : 0;
   return Math.max(0, base + p.extra[lv] - p.used[lv]);
 };
-function xPublic(cfg, who, phone, p, booked, sim, today) {
+/* 這個玩家這次還能領哪些獎 */
+function xClaims(cfg, p, treeLights) {
+  const layers = [];
+  (cfg.layers || []).forEach((t, k) => { if (treeLights >= t && !p.layers[k] && p.lights > 0) layers.push(k); });
+  return { layers, orn: p.orn.every(Boolean) };
+}
+function xPublic(cfg, who, phone, p, booked, sim, today, extra) {
   return {
     status: xStatus(cfg, today, sim), today, start: cfg.start, end: cfg.end, sim, booked,
     me: { name: p.name || who.displayName || "", phone: phone.slice(0, 4) + "-***-" + phone.slice(7) },
     p: {
       gifts: p.gifts, orn: p.orn, pos: p.pos, left: [xLeft(p, cfg, booked, sim, 0), xLeft(p, cfg, booked, sim, 1)],
-      arc: p.arc,
+      arc: p.arc, lights: p.lights, pts: p.pts, pointCap: cfg.pointCap, tree: p.tree, lot: p.lot,
     },
+    ...(extra || {}),
   };
 }
 async function xLoad(cfg, who, phone) {
   const sim = await xSim(cfg, phone, who.uid);
   const today = gDay();
-  const [raw, booked] = await Promise.all([fbGet(`${xBase(sim)}/${phone}`), xBooked(phone, who.uid)]);
-  return { sim, today, booked, p: xNorm(raw, cfg, today) };
+  const [raw, bk] = await Promise.all([fbGet(`${xBase(sim)}/${phone}`), xBookInfo(phone, who.uid)]);
+  const p = xNorm(raw, today);
+  p.uid = who.uid;
+  if (!p.name) p.name = who.displayName || "";
+  if (!p.first) p.first = new Date().toISOString();
+  return { sim, today, booked: bk.booked, klass: bk.klass, p };
+}
+const xPut = (L, phone) => {
+  const p = { ...L.p };
+  p.plantD = { day: L.today, n: p.plantN }; delete p.plantN;
+  p.gachaD = { day: L.today, n: p.gachaN }; delete p.gachaN;
+  p.gachaRealD = { day: L.today, n: p.gachaReal }; delete p.gachaReal;
+  p.giftGainD = { day: L.today, n: p.giftGain }; delete p.giftGain;
+  p.lightD = { day: L.today, n: p.lightDay }; delete p.lightDay;
+  return fbPut(`${xBase(L.sim)}/${phone}`, p);
+};
+async function xReady(who, body, needOpen) {
+  const cfg = await xConfig();
+  const r = await gResolvePhone(who, body || {});
+  if (!r.phone) throw xErr("請先輸入手機號碼", "NEED_PHONE");
+  const L = await xLoad(cfg, who, r.phone);
+  const st = xStatus(cfg, L.today, L.sim);
+  if (needOpen && (st === "soon" || st === "ended")) throw xErr(st === "soon" ? "聖誕走格子還沒開始" : "聖誕走格子已經結束", "CLOSED");
+  return { cfg, phone: r.phone, L };
+}
+
+/* 紅利、票券寫進會員檔案（格式同扭蛋；示範模式不呼叫） */
+async function xAddBonus(phone, name, v, reason) {
+  await gEnsureMember(phone, name);
+  const key = `gacha_${gDay()}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+  await fbPut(`members/${phone}/ledger/${key}`, {
+    at: new Date().toISOString(), by: "聖誕走格子", delta: v, type: "bonus", reason, src: "gacha",
+  });
+  const l = (await fbGet(`members/${phone}/ledger`)) || {};
+  const sum = { points: 0, sessions: 0, bonus: 0, voucher: 0 };
+  for (const k in l) {
+    const r = l[k]; if (!r) continue;
+    const d = Number(r.delta) || 0;
+    if (r.type in sum) sum[r.type] += d;
+  }
+  await fbPut(`members/${phone}/cache`, sum);
+}
+async function xAddTicket(phone, name, nm, kind, cfg, gid) {
+  await gEnsureMember(phone, name);
+  let list = (await fbGet(`members/${phone}/tickets`)) || [];
+  if (!Array.isArray(list)) list = Object.values(list);
+  list.push({
+    name: nm, qty: 1, expiry: cfg.expiry, kind: kind || "other",
+    raw: `聖誕走格子・${nm}`, batch: "xmas-" + cfg.start.slice(0, 7),
+    at: new Date().toISOString(), by: "聖誕走格子", src: "gacha", gid,
+  });
+  await fbPut(`members/${phone}/tickets`, list);
+}
+/* 發點數（受每人總上限限制）。回傳實際發的點數 */
+async function xGivePts(cfg, L, phone, v, reason) {
+  const can = Math.max(0, Math.min(v, (Number(cfg.pointCap) || 0) - L.p.pts));
+  if (can <= 0) return 0;
+  if (!L.sim) await xAddBonus(phone, L.p.name, can, reason);
+  L.p.pts += can;
+  return can;
 }
 
 app.get("/xmas/info", async (req, res) => {
@@ -2983,66 +3090,115 @@ app.get("/xmas/info", async (req, res) => {
   } catch (e) { gErr(res, e); }
 });
 
+/* 打開遊戲：讀進度；每天第一次順便加「打開遊戲 +1 燈」「今天有來上課 +10 燈」 */
 app.post("/xmas/state", async (req, res) => {
   try {
     const body = req.body || {};
     const who = await gWho(body.accessToken);
-    const cfg = await xConfig();
-    const r = await gResolvePhone(who, body);
-    if (!r.phone) return res.json({ ok: true, needPhone: true, guess: r.guess || "", lineName: who.displayName });
-    const L = await xLoad(cfg, who, r.phone);
-    res.json({ ok: true, ...xPublic(cfg, who, r.phone, L.p, L.booked, L.sim, L.today) });
+    const cfg0 = await xConfig();
+    const r0 = await gResolvePhone(who, body);
+    if (!r0.phone) return res.json({ ok: true, needPhone: true, guess: r0.guess || "", lineName: who.displayName });
+    const out = await gSerial(async () => {
+      const { cfg, phone, L } = await xReady(who, {}, false);
+      const gain = { open: 0, klass: 0 };
+      const st = xStatus(cfg, L.today, L.sim);
+      if (st === "on" || st === "test") {
+        const W = xWorld(L.sim);
+        let add = 0;
+        const room = () => Math.max(0, (Number(cfg.lightsDay) || 80) - L.p.lightDay);
+        if (L.p.openDay !== L.today) { const n = Math.min(room(), cfg.lights.open); gain.open = n; add += n; L.p.lightDay += n; L.p.openDay = L.today; }
+        if (L.klass && L.p.classDay !== L.today) { const n = Math.min(room(), cfg.lights.klass); gain.klass = n; add += n; L.p.lightDay += n; L.p.classDay = L.today; }
+        if (add) {
+          const t = (await fbGet(`${W}/tree`)) || {};
+          await fbPut(`${W}/tree`, { lights: (Number(t.lights) || 0) + add });
+          L.p.lights += add;
+        }
+        await xPut(L, phone);
+      }
+      return { ...xPublic(cfg, who, phone, L.p, L.booked, L.sim, L.today), gain };
+    });
+    res.json({ ok: true, ...out });
   } catch (e) { gErr(res, e); }
 });
 
-/* 擲骰子：次數和點數都在伺服器決定，前端只負責演 */
+/* 全體共用：聖誕樹、森林、小屋，加上我現在可以領的獎 */
+app.post("/xmas/world", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const who = await gWho(body.accessToken);
+    const { cfg, phone, L } = await xReady(who, body, false);
+    const W = xWorld(L.sim);
+    const [tree, forest, lots] = await Promise.all([fbGet(`${W}/tree`), fbGet(`${W}/forest`), fbGet(`${W}/lots`)]);
+    const lights = Number((tree || {}).lights) || 0;
+    const fl = [];
+    for (const s in forest || {}) {
+      const f = forest[s]; if (!f) continue;
+      fl.push({ s: Number(s), n: f.phone === phone ? "你" : gMask(f.n), lv: Number(f.lv) || 1, me: f.phone === phone });
+    }
+    const ll = {};
+    for (const i in lots || {}) {
+      const l = lots[i]; if (!l) continue;
+      ll[i] = { n: l.phone === phone ? "你" : gMask(l.n), lv: Number(l.lv) || 1, me: l.phone === phone };
+    }
+    res.json({ ok: true, tree: { lights, layers: cfg.layers }, forest: fl, lots: ll, claim: xClaims(cfg, L.p, lights), treePts: cfg.treePts,
+      ornPick: { gift: cfg.ornGift, point: cfg.ornPoint, ticket: (cfg.ornTicket || {}).nm || "" }, lotIdx: cfg.lotIdx, lotCost: cfg.lotCost, lotUpg: cfg.lotUpg });
+  } catch (e) { gErr(res, e); }
+});
+
+/* 擲骰子：次數和點數都在伺服器決定，前端只負責演；擲一次順便幫聖誕樹點 3 盞燈 */
 app.post("/xmas/roll", async (req, res) => {
   try {
     const body = req.body || {};
     const who = await gWho(body.accessToken);
     const lv = body.lv === 1 ? 1 : 0;
     const out = await gSerial(async () => {
-      const cfg = await xConfig();
-      const r = await gResolvePhone(who, {});
-      if (!r.phone) throw Object.assign(new Error("請先輸入手機號碼"), { code: "NEED_PHONE" });
-      const L = await xLoad(cfg, who, r.phone);
-      const st = xStatus(cfg, L.today, L.sim);
-      if (st === "soon" || st === "ended") throw Object.assign(new Error(st === "soon" ? "聖誕走格子還沒開始" : "聖誕走格子已經結束"), { code: "CLOSED" });
-      if (lv === 1 && !L.booked && !L.sim) throw Object.assign(new Error("預約上課才能打開第二層"), { code: "NEED_BOOKING" });
-      if (xLeft(L.p, cfg, L.booked, L.sim, lv) <= 0) throw Object.assign(new Error("今天的次數用完了，明天再來"), { code: "NO_LEFT" });
+      const { cfg, phone, L } = await xReady(who, {}, true);
+      if (lv === 1 && !L.booked && !L.sim) throw xErr("預約上課才能打開第二層", "NEED_BOOKING");
+      if (xLeft(L.p, cfg, L.booked, L.sim, lv) <= 0) throw xErr("今天的次數用完了，明天再來", "NO_LEFT");
       if (!L.sim) L.p.used[lv] += 1;
-      L.p.uid = who.uid;
-      if (!L.p.name) L.p.name = who.displayName || "";
-      if (!L.p.first) L.p.first = new Date().toISOString();
+      const W = xWorld(L.sim);
+      const room = Math.max(0, (Number(cfg.lightsDay) || 80) - L.p.lightDay);
+      const n = Math.min(room, Number(cfg.lights.roll) || 3);
+      let lightsNow = 0;
+      if (n > 0) {
+        const t = (await fbGet(`${W}/tree`)) || {};
+        lightsNow = (Number(t.lights) || 0) + n;
+        await fbPut(`${W}/tree`, { lights: lightsNow });
+        L.p.lights += n; L.p.lightDay += n;
+      }
       const v = 1 + Math.floor(Math.random() * 6);
-      await fbPut(`${xBase(L.sim)}/${r.phone}`, { ...L.p, lastRoll: { at: new Date().toISOString(), lv, v } });
-      return { ...xPublic(cfg, who, r.phone, L.p, L.booked, L.sim, L.today), v };
+      L.p.lastRoll = { at: new Date().toISOString(), lv, v };
+      await xPut(L, phone);
+      return { ...xPublic(cfg, who, phone, L.p, L.booked, L.sim, L.today), v, lightAdd: n };
     });
     res.json({ ok: true, ...out });
   } catch (e) { gErr(res, e); }
 });
 
 /* 走完一步之後把結果存起來：位置、禮物、吊飾、小遊戲最高分。
-   禮物只在遊戲裡用，所以放寬一點，但單次增加量有上限；
-   「再擲一次」要靠 extraAdd 通知伺服器，每天有上限。 */
+   禮物放寬一點但有每人每天上限；「再擲一次」要靠 extraAdd 通知，每天有上限。 */
 app.post("/xmas/save", async (req, res) => {
   try {
     const body = req.body || {};
     const who = await gWho(body.accessToken);
     const s = body.state && typeof body.state === "object" ? body.state : {};
     const out = await gSerial(async () => {
-      const cfg = await xConfig();
-      const r = await gResolvePhone(who, {});
-      if (!r.phone) throw Object.assign(new Error("請先輸入手機號碼"), { code: "NEED_PHONE" });
-      const L = await xLoad(cfg, who, r.phone);
-      const st = xStatus(cfg, L.today, L.sim);
-      if (st === "soon" || st === "ended") throw Object.assign(new Error("活動不在進行中"), { code: "CLOSED" });
+      const { cfg, phone, L } = await xReady(who, {}, true);
       const p = L.p;
       if (Number.isFinite(Number(s.gifts))) {
         const want = Math.max(0, Math.floor(Number(s.gifts)));
-        p.gifts = Math.min(want, p.gifts + (Number(cfg.giftGainMax) || 15));
+        if (want <= p.gifts) p.gifts = want;
+        else {
+          const room = Math.max(0, (Number(cfg.giftGainDay) || 60) - p.giftGain);
+          const add = Math.min(want - p.gifts, room);
+          p.gifts += add; p.giftGain += add;
+        }
       }
-      if (Array.isArray(s.orn)) p.orn = [0, 1, 2, 3].map((i) => !!s.orn[i]);
+      if (Array.isArray(s.orn)) {
+        const next = [0, 1, 2, 3].map((i) => !!s.orn[i]);
+        /* 吊飾只能多不能少（清空只有領獎才會做） */
+        p.orn = p.orn.map((o, i) => o || next[i]);
+      }
       if (Array.isArray(s.pos)) {
         [0, 1].forEach((i) => {
           const n = Number(cfg.tiles[i]) || 1, v = Math.floor(Number(s.pos[i]));
@@ -3060,9 +3216,209 @@ app.post("/xmas/save", async (req, res) => {
         }
         p.arc = { best, n: Math.max(0, Math.min(9, Math.floor(Number(s.arc.n) || 0))), day: L.today };
       }
-      p.uid = who.uid;
-      await fbPut(`${xBase(L.sim)}/${r.phone}`, p);
-      return xPublic(cfg, who, r.phone, p, L.booked, L.sim, L.today);
+      await xPut(L, phone);
+      return xPublic(cfg, who, phone, p, L.booked, L.sim, L.today);
+    });
+    res.json({ ok: true, ...out });
+  } catch (e) { gErr(res, e); }
+});
+
+/* 送禮物點亮聖誕樹：1 個禮物 = 10 盞（每人每天有上限） */
+app.post("/xmas/light", async (req, res) => {
+  try {
+    const who = await gWho((req.body || {}).accessToken);
+    const n = Math.max(1, Math.min(3, Math.floor(Number((req.body || {}).n) || 1)));
+    const out = await gSerial(async () => {
+      const { cfg, phone, L } = await xReady(who, {}, true);
+      if (L.p.gifts < n) throw xErr("禮物不夠", "NO_GIFT");
+      const per = Number(cfg.lights.gift) || 10;
+      const room = Math.max(0, (Number(cfg.lightsDay) || 80) - L.p.lightDay);
+      const add = Math.min(room, n * per);
+      if (add <= 0) throw xErr("今天幫聖誕樹點的燈夠多了，明天再來！", "LIGHT_CAP");
+      const used = Math.ceil(add / per);
+      L.p.gifts -= used; L.p.lights += add; L.p.lightDay += add;
+      const W = xWorld(L.sim);
+      const t = (await fbGet(`${W}/tree`)) || {};
+      const lightsNow = (Number(t.lights) || 0) + add;
+      await fbPut(`${W}/tree`, { lights: lightsNow });
+      await xPut(L, phone);
+      return { ...xPublic(cfg, who, phone, L.p, L.booked, L.sim, L.today), lightAdd: add, usedGifts: used, tree: { lights: lightsNow } };
+    });
+    res.json({ ok: true, ...out });
+  } catch (e) { gErr(res, e); }
+});
+
+/* 種樹／長大：每人一棵，位置由前端建議（離小熊最近的空位），伺服器確認沒被佔走 */
+app.post("/xmas/plant", async (req, res) => {
+  try {
+    const who = await gWho((req.body || {}).accessToken);
+    const pref = Math.floor(Number((req.body || {}).pref));
+    const out = await gSerial(async () => {
+      const { cfg, phone, L } = await xReady(who, {}, true);
+      const W = xWorld(L.sim), p = L.p;
+      if (p.plantN >= (Number(cfg.plantDayMax) || 4)) throw xErr("今天種樹／澆水的次數用完了，明天再來", "PLANT_CAP");
+      const forest = (await fbGet(`${W}/forest`)) || {};
+      const max = Number(cfg.forestMax) || 251;
+      let result;
+      if (!p.tree) {
+        let slot = -1;
+        if (Number.isFinite(pref) && pref >= 0 && pref < max && !forest[pref]) slot = pref;
+        else {
+          const start = Math.floor(Math.random() * max);
+          for (let k = 0; k < max; k++) { const s = (start + k) % max; if (!forest[s]) { slot = s; break; } }
+        }
+        if (slot < 0) { p.gifts += 1; p.plantN += 1; await xPut(L, phone); return { ...xPublic(cfg, who, phone, p, L.booked, L.sim, L.today), full: true }; }
+        await fbPut(`${W}/forest/${slot}`, { phone, n: p.name, lv: 1 });
+        p.tree = { s: slot, lv: 1 };
+        result = { kind: "new", s: slot, lv: 1 };
+      } else if (p.tree.lv >= 5) {
+        p.gifts += 1;
+        result = { kind: "max", s: p.tree.s, lv: 5 };
+      } else {
+        p.tree.lv += 1;
+        await fbPut(`${W}/forest/${p.tree.s}`, { phone, n: p.name, lv: p.tree.lv });
+        result = { kind: "grow", s: p.tree.s, lv: p.tree.lv };
+      }
+      p.plantN += 1;
+      await xPut(L, phone);
+      return { ...xPublic(cfg, who, phone, p, L.booked, L.sim, L.today), plant: result };
+    });
+    res.json({ ok: true, ...out });
+  } catch (e) { gErr(res, e); }
+});
+
+/* 空地小屋：認領／升級／拜訪 */
+app.post("/xmas/lot", async (req, res) => {
+  try {
+    const who = await gWho((req.body || {}).accessToken);
+    const idx = Math.floor(Number((req.body || {}).idx)), op = String((req.body || {}).op || "");
+    const out = await gSerial(async () => {
+      const { cfg, phone, L } = await xReady(who, {}, true);
+      if (!(cfg.lotIdx || []).includes(idx)) throw xErr("這不是空地", "BAD_LOT");
+      const W = xWorld(L.sim), p = L.p;
+      const lot = await fbGet(`${W}/lots/${idx}`);
+      let result = {};
+      if (op === "claim") {
+        if (lot) throw xErr("這塊地剛剛被別人認領了", "LOT_TAKEN");
+        if (p.lot !== null && p.lot !== undefined) throw xErr("你已經有一間聖誕小屋了", "LOT_MAX");
+        const cost = Number(cfg.lotCost) || 3;
+        if (p.gifts < cost) throw xErr("禮物不夠", "NO_GIFT");
+        p.gifts -= cost; p.lot = idx;
+        await fbPut(`${W}/lots/${idx}`, { phone, n: p.name, lv: 1, at: new Date().toISOString() });
+        result = { kind: "claim", lv: 1 };
+      } else if (op === "upgrade") {
+        if (!lot || lot.phone !== phone) throw xErr("這不是你的小屋", "NOT_YOURS");
+        const lv = Number(lot.lv) || 1;
+        if (lv >= 3) throw xErr("已經是最高級了", "LOT_MAXLV");
+        const cost = Number((cfg.lotUpg || [0, 4, 6])[lv]) || 4;
+        if (p.gifts < cost) throw xErr("禮物不夠", "NO_GIFT");
+        p.gifts -= cost;
+        await fbPut(`${W}/lots/${idx}/lv`, lv + 1);
+        result = { kind: "upgrade", lv: lv + 1 };
+      } else if (op === "visit") {
+        if (!lot) throw xErr("這塊地還沒有主人", "NO_LOT");
+        if (lot.phone === phone) throw xErr("這是你自己的小屋", "OWN_LOT");
+        const lv = Number(lot.lv) || 1;
+        const vd = p.visitD;
+        const again = !!vd.set[idx];
+        const room = Math.max(0, (Number(cfg.visitDayMax) || 10) - (Number(vd.n) || 0));
+        const g = again || room <= 0 ? 0 : Math.min(lv, room);
+        if (g > 0) {
+          p.gifts += g; vd.set[idx] = true; vd.n = (Number(vd.n) || 0) + g; p.visitD = vd;
+          const owner = (await fbGet(`${xBase(L.sim)}/${lot.phone}`)) || {};
+          const ow = xNorm(owner, L.today);
+          ow.gifts += g;
+          const ownerPut = { ...owner, gifts: ow.gifts };
+          await fbPut(`${xBase(L.sim)}/${lot.phone}`, ownerPut);
+          if (!L.sim && ow.uid) {
+            push(ow.uid, [{ type: "text", text: `🎄 有人拜訪了你的聖誕小屋！${gMask(p.name)} 來玩囉，你們各拿到 ${g} 個禮物。打開預約頁的聖誕走格子看看吧～` }]).catch(() => {});
+          }
+        }
+        result = { kind: "visit", gift: g, owner: gMask(lot.n), lv, again };
+      } else throw xErr("不明的操作", "BAD_OP");
+      await xPut(L, phone);
+      return { ...xPublic(cfg, who, phone, p, L.booked, L.sim, L.today), lotRes: result };
+    });
+    res.json({ ok: true, ...out });
+  } catch (e) { gErr(res, e); }
+});
+
+/* 領獎：聖誕樹某一層（參與過的會員各領）／吊飾集滿（禮物、紅利、材料升級券三選一） */
+app.post("/xmas/claim", async (req, res) => {
+  try {
+    const who = await gWho((req.body || {}).accessToken);
+    const kind = String((req.body || {}).kind || "");
+    const out = await gSerial(async () => {
+      const { cfg, phone, L } = await xReady(who, {}, true);
+      const W = xWorld(L.sim), p = L.p;
+      let result = {};
+      if (kind === "tree") {
+        const k = Math.floor(Number((req.body || {}).layer));
+        const t = (await fbGet(`${W}/tree`)) || {};
+        const lights = Number(t.lights) || 0;
+        if (!(k >= 0 && k < cfg.layers.length) || lights < cfg.layers[k]) throw xErr("這一層還沒亮", "NOT_YET");
+        if (p.layers[k]) throw xErr("這一層的獎你已經領過了", "CLAIMED");
+        if (!(p.lights > 0)) throw xErr("先幫聖誕樹點個燈，才領得到喔", "NO_PART");
+        const want = Number(cfg.treePts[k]) || 0;
+        const got = await xGivePts(cfg, L, phone, want, `聖誕樹第 ${k + 1} 層亮了`);
+        p.layers[k] = true;
+        result = { kind: "tree", layer: k, want, pts: got, capped: got < want };
+      } else if (kind === "orn") {
+        if (!p.orn.every(Boolean)) throw xErr("吊飾還沒集滿", "NOT_FULL");
+        const pick = String((req.body || {}).pick || "gift");
+        let got = { pick: "gift", gift: Number(cfg.ornGift) || 5 };
+        if ((pick === "point" || pick === "ticket") && p.ornReal < 1) {
+          if (pick === "point") {
+            const pts = await xGivePts(cfg, L, phone, Number(cfg.ornPoint) || 3, "集滿四個聖誕吊飾");
+            if (pts > 0) { got = { pick: "point", pts }; p.ornReal += 1; }
+          } else {
+            const tk = cfg.ornTicket || {};
+            if (!L.sim) await xAddTicket(phone, p.name, tk.nm || "材料升級券", tk.kind || "upgrade", cfg, "orn");
+            got = { pick: "ticket", nm: tk.nm || "材料升級券" }; p.ornReal += 1;
+          }
+        }
+        if (got.pick === "gift") p.gifts += got.gift;
+        p.orn = [false, false, false, false]; p.ornRounds += 1;
+        result = { kind: "orn", got, firstOnly: pick !== "gift" && got.pick === "gift" };
+      } else throw xErr("不明的領獎", "BAD_KIND");
+      await xPut(L, phone);
+      return { ...xPublic(cfg, who, phone, p, L.booked, L.sim, L.today), claimRes: result };
+    });
+    res.json({ ok: true, ...out });
+  } catch (e) { gErr(res, e); }
+});
+
+/* 扭蛋機格：依獎池抽一個。真獎勵（紅利、票券）每人每天最多一個、受總上限、限量與「同票券每人一張」限制，
+   不符合就改抽禮物。示範模式只演不入帳。 */
+app.post("/xmas/gacha", async (req, res) => {
+  try {
+    const who = await gWho((req.body || {}).accessToken);
+    const out = await gSerial(async () => {
+      const { cfg, phone, L } = await xReady(who, {}, true);
+      const W = xWorld(L.sim), p = L.p;
+      if (p.gachaN >= (Number(cfg.gachaDayMax) || 3)) throw xErr("今天的扭蛋機轉完了，明天再來", "GACHA_CAP");
+      const stock = L.sim ? {} : (await fbGet("xmas/stock")) || {};
+      const realOk = (x) => {
+        if (x.type === "gift") return true;
+        if (p.gachaReal >= (Number(cfg.gachaRealDay) || 1)) return false;
+        if (x.type === "bonus") return p.pts + (Number(x.v) || 0) <= (Number(cfg.pointCap) || 0);
+        if (x.type === "ticket") return !p.tickets[x.id] && (x.qty == null || (Number(stock[x.id]) || 0) < Number(x.qty));
+        return false;
+      };
+      const pool = (cfg.gachaPool || []).filter(realOk);
+      const prize = gPick(pool.length ? pool : (cfg.gachaPool || []).filter((x) => x.type === "gift"));
+      const result = { id: prize.id, nm: prize.nm, type: prize.type };
+      if (prize.type === "gift") { p.gifts += Number(prize.n) || 1; result.n = Number(prize.n) || 1; }
+      else if (prize.type === "bonus") {
+        const got = await xGivePts(cfg, L, phone, Number(prize.v) || 1, "扭蛋機：" + prize.nm);
+        result.pts = got; p.gachaReal += 1;
+      } else if (prize.type === "ticket") {
+        if (!L.sim) { await xAddTicket(phone, p.name, prize.nm, prize.kind, cfg, "gacha-" + prize.id); await fbPut(`xmas/stock/${prize.id}`, (Number(stock[prize.id]) || 0) + 1); }
+        p.tickets[prize.id] = true; p.gachaReal += 1;
+      }
+      p.gachaN += 1;
+      await xPut(L, phone);
+      return { ...xPublic(cfg, who, phone, p, L.booked, L.sim, L.today), gachaRes: result };
     });
     res.json({ ok: true, ...out });
   } catch (e) { gErr(res, e); }
