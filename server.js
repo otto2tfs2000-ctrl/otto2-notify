@@ -118,7 +118,10 @@ async function gvizSheet(sheetName) {
   const a = t.indexOf("{"), b = t.lastIndexOf("}");
   const j = JSON.parse(t.substring(a, b + 1));
   if (!j.table) throw new Error(`找不到工作表「${sheetName}」`);
-  return j.table.rows.map((r) => r.c.map((c) => (c ? (c.f ?? c.v) : "")));
+  const out = j.table.rows.map((r) => r.c.map((c) => (c ? (c.f ?? c.v) : "")));
+  /* 標題掛在陣列上（不可列舉），後來加在最右邊的欄位（例如「兩人價」）照標題找 */
+  Object.defineProperty(out, "__head", { value: (j.table.cols || []).map((c) => String((c && (c.label || c.id)) || "").trim()), enumerable: false });
+  return out;
 }
 
 /* 班表：試算表「班表」當底，Firebase /schedule 蓋過去——
@@ -214,6 +217,11 @@ const COURSE_CATALOG_TTL = 5 * 60 * 1000;
 async function loadCourseCatalog() {
   if (courseCatalogCache.data && Date.now() - courseCatalogCache.ts < COURSE_CATALOG_TTL) return courseCatalogCache.data;
   const rows = await gvizSheet("課程");
+  /* 「兩人價」是後來加在最右邊的欄，照標題找：gviz 有認出標題列就在 __head，
+     沒認出來的話標題會是資料第一列（「分類」開頭） */
+  let head = rows.__head || [];
+  if (rows.length && String(rows[0][0] || "").trim() === "分類") head = rows[0].map((x) => String(x || "").trim());
+  const iPair = head.findIndex((h) => String(h).replace(/\s/g, "") === "兩人價");
   const items = rows
     .map((r) => ({
       cat: String(r[0] || "").trim(),
@@ -221,10 +229,11 @@ async function loadCourseCatalog() {
       desc: String(r[2] || "").trim(),
       spec: String(r[3] || "").trim(),
       price: String(r[5] ?? "").trim(),
+      pair: iPair >= 0 ? Number(String(r[iPair] ?? "").replace(/[^\d.]/g, "")) || 0 : 0,
       on: String(r[7] || "Y").trim().toUpperCase() !== "N",
       minAge: Number(r[9]) || 0,
     }))
-    .filter((it) => it.name && it.on);
+    .filter((it) => it.name && it.on && it.name !== "課程名稱");
   courseCatalogCache = { data: items, ts: Date.now() };
   return items;
 }
@@ -281,12 +290,17 @@ const isPriceTierSpec = (s) => PRICE_TIER_WORDS.some((w) => String(s || "").incl
 /* 組成給 AI 看的課程清單文字，含加購。同一門課多個規格併成一行，
    AI 只能從這份清單裡挑課程名稱和規格的原始文字，不可以自己編或翻譯，
    不然客人端拿這串文字去對 groups 會對不到，整個流程就斷了。 */
+/* 兩人價：大熊在課程表「兩人價」欄自己挑課設定，沒填的課沒有同行優惠。
+   同課同尺寸每兩位算一次兩人價，落單的那位照原價（跟客人端 pairTotal 同一條公式）。 */
+const pairNote = (v) => (v.pair > 0
+  ? `（兩人同行 $${v.pair}：同一門課同一個規格每兩位一組算 $${v.pair}，落單的那位照原價；booking JSON 的 price 仍填單人原價 $${v.price}）`
+  : "");
 function courseCatalogText(items, addons) {
   const byKey = new Map();
   for (const it of items) {
     const k = it.cat + "|" + it.name;
     if (!byKey.has(k)) byKey.set(k, { cat: it.cat, name: it.name, desc: it.desc, minAge: it.minAge, variants: [] });
-    byKey.get(k).variants.push({ spec: it.spec, price: it.price });
+    byKey.get(k).variants.push({ spec: it.spec, price: it.price, pair: it.pair });
   }
   const addonsByCourse = new Map();
   for (const a of addons || []) {
@@ -302,11 +316,11 @@ function courseCatalogText(items, addons) {
           g.variants.find((v) => v.spec.includes("單次原價")) ||
           g.variants.find((v) => v.spec.includes("原價")) ||
           g.variants.reduce((a, b) => (Number(b.price) > Number(a.price) ? b : a));
-        specsText = `非會員價 $${orig.price}（這是唯一給你的價格，不要主動提會員價或體驗價這些選項——` +
+        specsText = `非會員價 $${orig.price}${pairNote(orig)}（這是唯一給你的價格，不要主動提會員價或體驗價這些選項——` +
           `如果之後要輸出 booking JSON，spec 請填「${orig.spec}」；客人是不是會員、能不能用優惠價，` +
           `交給客人送出預約、填手機那一步由系統自動核對套用，你不用猜也不用問）`;
       } else {
-        specsText = g.variants.map((v) => `${v.spec || "單一規格"} $${v.price}`).join("、");
+        specsText = g.variants.map((v) => `${v.spec || "單一規格"} $${v.price}${pairNote(v)}`).join("、");
       }
       const ads = addonsByCourse.get(g.name);
       return `【${g.cat}】${g.name}${g.minAge ? `（${g.minAge}歲以上）` : ""}：${g.desc}\n  規格與價格：${specsText}` +
@@ -2856,7 +2870,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-09-30-gacha-tiers";
+const SERVER_VERSION = "2026-10-02-pair-price";
 
 app.get("/health", async (_, res) => {
   const out = {
