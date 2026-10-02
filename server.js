@@ -3539,7 +3539,9 @@ async function islWho(body) {
     phone = await fbGet(`lineIndex/${who.uid}`);
     if (!(typeof phone === "string" && gValidPhone(phone))) phone = "";
   }
-  return { who, staff, phone };
+  /* 小屋的鑰匙：會員用電話；工作人員沒有綁電話就用 LINE 身分（2026-10-03 大熊要工作人員也能有小屋） */
+  const key = phone || (staff ? "staff_" + who.uid : "");
+  return { who, staff, phone, key };
 }
 
 /* 會員：手上有點數／堂數／票券；或曾經買過方案、儲過值（ledger 有紀錄，扭蛋紅利不算） */
@@ -3553,7 +3555,7 @@ function islIsMember(m) {
 
 function islPublic(raw) {
   const houses = Object.entries(raw.houses || {}).filter(([, h]) => h && h.name).map(([id, h]) => ({
-    id, name: h.name, style: h.style, since: h.since, ts: h.ts || 0,
+    id, name: h.name, style: h.style, since: h.since, ts: h.ts || 0, staff: !!h.staff,
     works: Object.entries(h.works || {}).map(([wid, w]) => ({ id: wid, title: w.title || "", date: w.date || "", by: w.by || "", ts: w.ts || 0 }))
       .sort((a, b) => a.ts - b.ts),
   })).sort((a, b) => a.ts - b.ts);
@@ -3593,10 +3595,10 @@ app.get("/island/img/:id/:s", async (req, res) => {
 /* 我是誰：有沒有小屋、是不是會員、是不是員工 */
 app.post("/island/me", async (req, res) => {
   try {
-    const { who, staff, phone } = await islWho(req.body || {});
-    let hid = phone ? await fbGet(`island/owner/${phone}`) : null;
+    const { who, staff, phone, key } = await islWho(req.body || {});
+    let hid = key ? await fbGet(`island/owner/${key}`) : null;
     const m = phone ? await fbGet(`members/${phone}`) : null;
-    res.json({ ok: true, staff, house: typeof hid === "string" ? hid : null, member: islIsMember(m), hasPhone: !!phone,
+    res.json({ ok: true, staff, house: typeof hid === "string" ? hid : null, member: staff || islIsMember(m), hasPhone: !!phone || staff,
       lineName: who.displayName, suggest: (m && m.name) || "" });
   } catch (e) { gErr(res, e); }
 });
@@ -3605,16 +3607,19 @@ app.post("/island/me", async (req, res) => {
 app.post("/island/join", async (req, res) => {
   try {
     const body = req.body || {};
-    const { who, phone: bound } = await islWho(body);
-    let phone = bound;
-    if (!phone) {
-      phone = normPhone(body.phone || "");
-      if (!gValidPhone(phone)) throw islErr("請輸入上課登記的手機號碼（09 開頭 10 碼）", "BAD_PHONE");
+    const { who, staff, phone: bound, key: sKey } = await islWho(body);
+    let phone = bound, key = sKey;
+    if (!staff) {
+      if (!phone) {
+        phone = normPhone(body.phone || "");
+        if (!gValidPhone(phone)) throw islErr("請輸入上課登記的手機號碼（09 開頭 10 碼）", "BAD_PHONE");
+        key = phone;
+      }
+      const m = await fbGet(`members/${phone}`);
+      if (!islIsMember(m)) throw islErr("作品島目前只開放給 OTTO2 會員。如果你是會員卻搬不進來，請私訊小編", "NOT_MEMBER");
+      if (m.lineUserId && m.lineUserId !== who.uid) throw islErr("這支電話已經綁定另一個 LINE 帳號。如果是你本人，請私訊小編幫你處理", "PHONE_TAKEN");
     }
-    const m = await fbGet(`members/${phone}`);
-    if (!islIsMember(m)) throw islErr("作品島目前只開放給 OTTO2 會員。如果你是會員卻搬不進來，請私訊小編", "NOT_MEMBER");
-    if (m.lineUserId && m.lineUserId !== who.uid) throw islErr("這支電話已經綁定另一個 LINE 帳號。如果是你本人，請私訊小編幫你處理", "PHONE_TAKEN");
-    const had = await fbGet(`island/owner/${phone}`);
+    const had = await fbGet(`island/owner/${key}`);
     if (typeof had === "string") return res.json({ ok: true, house: had, existed: true });
     const name = String(body.name || "").trim().slice(0, 8);
     if (!name) throw islErr("請寫一個門牌名字", "NO_NAME");
@@ -3623,10 +3628,10 @@ app.post("/island/join", async (req, res) => {
     if (all && Object.keys(all).length >= ISL_MAX) throw islErr("作品島目前住滿了，我們正在擴建，請私訊小編登記", "FULL");
     const style = ISL_STYLES.includes(body.style) ? body.style : "stack";
     const hid = "h" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    await fbPut(`island/houses/${hid}`, { phone, uid: who.uid, name, style, since: Number(String(gDay()).slice(0, 4)), ts: Date.now(), works: {} });
-    await fbPut(`island/owner/${phone}`, hid);
-    if (!bound) await fbPut(`lineIndex/${who.uid}`, phone);
-    gLinkMember(who.uid, phone);
+    await fbPut(`island/houses/${hid}`, { phone: phone || "", uid: who.uid, name, style, since: Number(String(gDay()).slice(0, 4)), ts: Date.now(), staff: !!staff, works: {} });
+    await fbPut(`island/owner/${key}`, hid);
+    if (phone && !bound) await fbPut(`lineIndex/${who.uid}`, phone);
+    if (phone) gLinkMember(who.uid, phone);
     islDirty();
     res.json({ ok: true, house: hid });
   } catch (e) { gErr(res, e); }
@@ -3637,7 +3642,7 @@ const islDaily = new Map();
 app.post("/island/upload", async (req, res) => {
   try {
     const body = req.body || {};
-    const { who, staff, phone } = await islWho(body);
+    const { who, staff, key } = await islWho(body);
     const f = String(body.full || ""), t = String(body.thumb || "");
     const okImg = (s, max) => s.startsWith("data:image/jpeg;base64,") && s.length < max;
     if (!okImg(f, 900000) || !okImg(t, 120000)) throw islErr("照片格式不對，請換一張再試", "BAD_IMG");
@@ -3648,7 +3653,7 @@ app.post("/island/upload", async (req, res) => {
       if (!staff) throw islErr("只有老師可以放大樹相簿", "NOT_STAFF");
       path = "island/album";
     } else {
-      const mine = phone ? await fbGet(`island/owner/${phone}`) : null;
+      const mine = key ? await fbGet(`island/owner/${key}`) : null;
       const hid = String(body.target || "") || mine;
       if (!hid || typeof hid !== "string") throw islErr("先搬進你的小屋，才能放作品", "NO_HOUSE");
       if (hid !== mine && !staff) throw islErr("只能把作品放進自己的小屋", "NOT_YOURS");
@@ -3672,13 +3677,13 @@ app.post("/island/upload", async (req, res) => {
 app.post("/island/delete", async (req, res) => {
   try {
     const body = req.body || {};
-    const { staff, phone } = await islWho(body);
+    const { staff, key } = await islWho(body);
     const wid = String(body.id || "");
     if (!/^w[\w]{4,30}$/.test(wid)) throw islErr("找不到這張照片", "BAD_ID");
     let path = null;
     if (body.album) { if (!staff) throw islErr("只有老師可以刪大樹相簿", "NOT_STAFF"); path = `island/album/${wid}`; }
     else {
-      const mine = phone ? await fbGet(`island/owner/${phone}`) : null;
+      const mine = key ? await fbGet(`island/owner/${key}`) : null;
       const hid = String(body.house || "");
       if (!hid || (hid !== mine && !staff)) throw islErr("只能刪自己小屋裡的作品", "NOT_YOURS");
       path = `island/houses/${hid}/works/${wid}`;
