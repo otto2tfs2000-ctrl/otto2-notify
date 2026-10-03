@@ -570,6 +570,52 @@ app.post("/notify/plan", async (req, res) => {
   }
 });
 
+/* ══ 1.6 固定時段（2026-10-03）══
+   家長要求每週固定同一時段上課，後台一次排好最多一個月（4 次）。
+   這張卡取代一般的預約確認，把日期、預扣點數、取消規則一次講清楚。
+   點數是核銷時才真的扣，這裡只是告知。 */
+app.post("/notify/fixed", async (req, res) => {
+  try {
+    const b = req.body || {};
+    const uid = b.line?.userId;
+    if (!uid) return res.json({ ok: false, skip: "無 LINE 身分，略過推播" });
+    const dates = Array.isArray(b.dates) ? b.dates : [];
+    if (!dates.length) return res.status(400).json({ ok: false, error: "沒有日期" });
+    const pts = Number(b.pts || 800);
+    const slots = (Array.isArray(b.slots) ? b.slots : []).join("、");
+    const [y, m, dd] = dates[0].split("/").map(Number);
+    const wd = WD[new Date(y, m - 1, dd).getDay()];
+
+    const bubble = card({
+      tag: "固定時段預約",
+      tagColor: "#3B4A8C",
+      title: b.name ? `${b.name}，固定時段已保留` : "固定時段已保留",
+      rows: [
+        row("時段", `每週${wd}　${slots}`, true),
+        row("日期", dates.map(dateLabel).join("\n"), true),
+        row("課程", itemLines(b.items).join("\n") || "—"),
+        ...(b.people ? [row("人數", `${b.people} 位`)] : []),
+        row("預扣點數", `${pts} 點 × ${dates.length} 次 = ${(pts * dates.length).toLocaleString()} 點`, true),
+      ],
+      notes: [
+        `固定時段會先預扣點數，每次 ${pts} 點，最多一個月 4 次（${(pts * 4).toLocaleString()} 點）。`,
+        "如需請假，請在上課前事先告知小編，或從 LINE 預約頁自行取消，取消的那次不扣點。",
+        `沒有事先取消、當天未到課，該次仍會扣除 ${pts} 點。`,
+      ].join("\n"),
+      footer: "Otto2 ARTCLUB 藝術工作室",
+    });
+
+    await push(uid, [
+      { type: "flex", altText: `固定時段已保留：每週${wd} ${slots}，共 ${dates.length} 次`, contents: bubble },
+    ]);
+    console.log("固定時段推播成功 →", uid.slice(0, 8) + "...", dates.join(","));
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("固定時段推播失敗：", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 /* ══ 2. 預約取消 ══ */
 app.post("/notify/cancel", async (req, res) => {
   try {
@@ -2870,7 +2916,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-02-pair-price";
+const SERVER_VERSION = "2026-10-03-fixed-slot";
 
 app.get("/health", async (_, res) => {
   const out = {
