@@ -2120,8 +2120,21 @@ function gSerial(fn) {
 
 /* access token → LINE userId。同一張 token 十分鐘內不重複問 LINE */
 const gTokCache = new Map();
-async function gWho(accessToken) {
+/* 店內體驗平板（park.html?kiosk=1）沒有 LINE 登入，用固定的 "kiosk" 當身分。
+   只有扭蛋的 state/spin/quiz/memory 認它，而且一律走示範模式（不入帳、不扣限量），
+   其他功能（作品島、走格子、綁電話）傳 "kiosk" 一樣當成沒登入 */
+const KIOSK_PHONE = "0900000000";
+const KIOSK_WHO = { uid: "kiosk", displayName: "店內體驗", kiosk: true };
+async function gBound(who) {
+  if (who.kiosk) return KIOSK_PHONE;
+  return fbGet(`gacha/bind/${who.uid}`);
+}
+async function gWho(accessToken, allowKiosk) {
   const tok = String(accessToken || "");
+  if (tok === "kiosk") {
+    if (allowKiosk) return KIOSK_WHO;
+    throw Object.assign(new Error("請從 LINE 打開預約頁再玩"), { code: "NO_LINE" });
+  }
   if (!tok) throw Object.assign(new Error("請從 LINE 打開預約頁再玩"), { code: "NO_LINE" });
   const hit = gTokCache.get(tok);
   if (hit && hit.until > Date.now()) return hit.who;
@@ -2221,6 +2234,7 @@ async function gLinkMember(uid, phone) {
 
 /* 找出這個 LINE 帳號綁的電話；還沒綁的話，身上帶了電話就綁上去 */
 async function gResolvePhone(who, body) {
+  if (who.kiosk) return { phone: KIOSK_PHONE };
   let phone = await fbGet(`gacha/bind/${who.uid}`);
   if (typeof phone === "string" && gValidPhone(phone)) { gLinkMember(who.uid, phone); return { phone }; }
   const want = normPhone(body.phone || "");
@@ -2264,6 +2278,7 @@ async function gIsStaff(uid) {
   return v;
 }
 async function gSim(cfg, phone, uid) {
+  if (uid === "kiosk" && phone === KIOSK_PHONE) return true;
   const today = gDay();
   if (today < cfg.start) return (cfg.testPhones || []).includes(phone) || (await gIsStaff(uid));
   if (today > cfg.end) return false;
@@ -2401,7 +2416,7 @@ app.get("/gacha/info", async (req, res) => {
 app.post("/gacha/state", async (req, res) => {
   try {
     const body = req.body || {};
-    const who = await gWho(body.accessToken);
+    const who = await gWho(body.accessToken, true);
     const cfg = await gConfig();
     const r = await gResolvePhone(who, body);
     if (!r.phone) return res.json({ ok: true, needPhone: true, guess: r.guess || "", lineName: who.displayName, title: cfg.title, start: cfg.start, end: cfg.end });
@@ -2411,10 +2426,10 @@ app.post("/gacha/state", async (req, res) => {
 
 app.post("/gacha/spin", async (req, res) => {
   try {
-    const who = await gWho((req.body || {}).accessToken);
+    const who = await gWho((req.body || {}).accessToken, true);
     const out = await gSerial(async () => {
       const cfg = await gConfig();
-      const phone = await fbGet(`gacha/bind/${who.uid}`);
+      const phone = await gBound(who);
       if (typeof phone !== "string" || !gValidPhone(phone)) throw Object.assign(new Error("請先輸入電話"), { code: "NEED_PHONE" });
       const today = gDay();
       const sim = await gSim(cfg, phone, who.uid);
@@ -2425,7 +2440,9 @@ app.post("/gacha/spin", async (req, res) => {
       const [pl, m, stock] = await Promise.all([
         fbGet(`${base}/${phone}`), fbGet(`members/${phone}`), fbGet("gacha/stock"),
       ]);
-      const p = pl || {};
+      let p = pl || {};
+      /* 店內體驗平板大家輪流玩：轉滿 30 次（圖鑑、集章都跑完了）就清空重來 */
+      if (who.kiosk && (Number(p.spins) || 0) >= 30) { await fbDel(`${base}/${phone}`); p = {}; }
       const reasons = sim ? [{ why: "test", label: gDay() < cfg.start ? "測試模式" : "示範模式" }] : await gChances(cfg, phone, who.uid, (p.days || {})[today], p, m);
       const used = sim ? Number(p.spins) || 0 : Number((p.days || {})[today]?.n) || 0;
       if (!sim && used >= reasons.length) throw Object.assign(new Error("今天的機會用完了，明天再來轉！"), { code: "NO_CHANCE" });
@@ -2721,11 +2738,11 @@ function gOpen(cfg, sim) {
 
 app.post("/gacha/quiz", async (req, res) => {
   try {
-    const who = await gWho((req.body || {}).accessToken);
+    const who = await gWho((req.body || {}).accessToken, true);
     const out = await gSerial(async () => {
       const cfg = await gConfig();
       if (!(cfg.games || {}).quiz) throw Object.assign(new Error("小問答目前沒有開放"), { code: "OFF" });
-      const phone = await fbGet(`gacha/bind/${who.uid}`);
+      const phone = await gBound(who);
       if (typeof phone !== "string" || !gValidPhone(phone)) throw Object.assign(new Error("請先輸入電話"), { code: "NEED_PHONE" });
       const sim = await gSim(cfg, phone, who.uid);
       gOpen(cfg, sim);
@@ -2749,11 +2766,11 @@ app.post("/gacha/quiz", async (req, res) => {
 
 app.post("/gacha/memory", async (req, res) => {
   try {
-    const who = await gWho((req.body || {}).accessToken);
+    const who = await gWho((req.body || {}).accessToken, true);
     const out = await gSerial(async () => {
       const cfg = await gConfig();
       if (!(cfg.games || {}).memory) throw Object.assign(new Error("翻牌遊戲目前沒有開放"), { code: "OFF" });
-      const phone = await fbGet(`gacha/bind/${who.uid}`);
+      const phone = await gBound(who);
       if (typeof phone !== "string" || !gValidPhone(phone)) throw Object.assign(new Error("請先輸入電話"), { code: "NEED_PHONE" });
       const sim = await gSim(cfg, phone, who.uid);
       gOpen(cfg, sim);
