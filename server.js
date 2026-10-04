@@ -3737,7 +3737,8 @@ function islIsMember(m) {
 function islPublic(raw) {
   const houses = Object.entries(raw.houses || {}).filter(([, h]) => h && h.name).map(([id, h]) => ({
     id, name: h.name, style: h.style, since: h.since, ts: h.ts || 0, staff: !!h.staff,
-    works: Object.entries(h.works || {}).map(([wid, w]) => ({ id: wid, title: w.title || "", date: w.date || "", by: w.by || "", ts: w.ts || 0 }))
+    works: Object.entries(h.works || {}).map(([wid, w]) => ({ id: wid, title: w.title || "", date: w.date || "", by: w.by || "", ts: w.ts || 0,
+      cm: w.cm && w.cm.a && w.cm.t ? { a: w.cm.a, t: w.cm.t } : null }))
       .sort((a, b) => a.ts - b.ts),
   })).sort((a, b) => a.ts - b.ts);
   const album = Object.entries(raw.album || {}).map(([wid, w]) => ({ id: wid, title: w.title || "", date: w.date || "", ts: w.ts || 0 }))
@@ -3872,6 +3873,154 @@ app.post("/island/delete", async (req, res) => {
     await fbDel(path);
     await fbDel(`island/img/${wid}`);
     islThumbs.delete(wid);
+    islDirty();
+    res.json({ ok: true });
+  } catch (e) { gErr(res, e); }
+});
+
+/* ══════════════════════════════════════════════════════════
+   作品島：藝術家島民看作品說話（2026-10-05 大熊要的）
+   - 家長上傳作品後，前端呼叫 /island/comment；伺服器把縮圖給 Claude 看，
+     挑一位風格最像的島民（挑不出來就隨機），用那位藝術家的口吻講一兩句話
+   - 存在 island/houses/{hid}/works/{wid}/cm = {a, t, ai, ts}，之後大家點開作品都看得到
+   - 一件作品只講一次；只有屋主或員工能請藝術家來看（免得被亂按花錢）
+   - AI 連不上、拒答、格式不對 → 改用固定台詞，不讓家長卡住
+   - 大樹相簿不講話（大熊說不用）
+   ══════════════════════════════════════════════════════════ */
+const ISL_ARTISTS = [
+  { n: "梵谷", s: "後印象派；旋轉有力的筆觸、星空、向日葵、濃烈的藍和黃" },
+  { n: "莫內", s: "印象派；光線、水面倒影、花園、睡蓮、柔和的粉彩色" },
+  { n: "達利", s: "超現實主義；夢境、奇怪的組合、會融化的東西、天馬行空" },
+  { n: "克林姆", s: "金色裝飾、圖案花紋、華麗閃亮" },
+  { n: "米羅", s: "簡單的符號、星星、線條、紅藍黃黑的鮮豔色塊、像童話" },
+  { n: "卡蘿", s: "自畫像、人物、花、動物、鮮豔的墨西哥色彩" },
+  { n: "慕夏", s: "新藝術；優雅的線條、花環、圓形光圈、女孩、海報感" },
+  { n: "畢卡索", s: "立體派；幾何形狀、拼貼、從不同角度看的臉、大膽變形" },
+  { n: "林布蘭", s: "光影明暗、深色背景、人像、溫暖的光" },
+  { n: "草間彌生", s: "圓點點、重複的圖案、南瓜、強烈對比色" },
+  { n: "奈良美智", s: "可愛的大頭小孩、動物角色、簡單乾淨的卡通風" },
+  { n: "葛飾北齋", s: "浮世繪；海浪、山、風景、藍色、線條清楚" },
+];
+const ISL_FALLBACK = [
+  (t) => `${t}的顏色好有精神，我站在旁邊看了好久！`,
+  (t) => `我很喜歡${t}，看得出來你畫得很用心。`,
+  (t) => `${t}讓我也想拿起畫筆了，繼續畫下去吧！`,
+  (t) => `這張好特別！${t}裡藏著你自己的想法，真棒。`,
+];
+function islFallbackComment(title) {
+  const a = ISL_ARTISTS[Math.floor(Math.random() * ISL_ARTISTS.length)].n;
+  const t = title ? `《${title}》` : "這件作品";
+  return { a, t: ISL_FALLBACK[Math.floor(Math.random() * ISL_FALLBACK.length)](t), ai: false };
+}
+const ISL_CM_SYSTEM = `你是 OTTO2 兒童美術教室「作品島」上的藝術家島民。小朋友（或大人學員）上傳了一件自己的作品照片，請你：
+1. 從下面的島民裡，挑一位「風格、主題、顏色」跟這件作品最像的藝術家來看這幅畫。真的看不出像誰，就挑你覺得最適合鼓勵他的。
+${ISL_ARTISTS.map((x) => `- ${x.n}：${x.s}`).join("\n")}
+2. 用那位藝術家的口吻（第一人稱「我」），對作品說一到兩句話，繁體中文，40～70 個字。
+規則：
+- 具體講到畫裡看得到的東西（顏色、形狀、主題、筆觸），可以連結到這位藝術家自己的作品或習慣，讓人會心一笑。
+- 只稱讚和鼓勵；最多加一個很溫和的小建議（例如「下次可以試試…」），不要批評、不要打分數、不要比較。
+- 小朋友聽得懂的口語，溫暖、有點俏皮，不要說教，不用表情符號。
+- 畫出來的人像可以講畫法、顏色和表情，但不要猜畫的是誰；照片裡真實的人、名字、學校、電話等個人資訊完全不要提。
+- 如果照片看起來不是作品（例如自拍、截圖、風景照），isArt 給 false，comment 寫一句通用的鼓勵（不要描述照片內容）。`;
+const ISL_CM_SCHEMA = {
+  type: "object",
+  properties: {
+    artist: { type: "string", enum: ISL_ARTISTS.map((x) => x.n) },
+    comment: { type: "string" },
+    isArt: { type: "boolean" },
+  },
+  required: ["artist", "comment", "isArt"],
+  additionalProperties: false,
+};
+async function islAskClaude(body, withFallback) {
+  const headers = { "Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" };
+  if (withFallback) { headers["anthropic-beta"] = "server-side-fallback-2026-07-01"; body = { ...body, fallbacks: "default" }; }
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 45000);
+  try {
+    const r = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers, body: JSON.stringify(body), signal: ctl.signal });
+    return { status: r.status, ok: r.ok, j: await r.json() };
+  } finally { clearTimeout(timer); }
+}
+async function islAiComment(thumb, title) {
+  if (!ANTHROPIC_API_KEY) return islFallbackComment(title);
+  const body = {
+    model: "claude-opus-5-5",
+    max_tokens: 4000,
+    system: ISL_CM_SYSTEM,
+    output_config: { effort: "low", format: { type: "json_schema", schema: ISL_CM_SCHEMA } },
+    messages: [{ role: "user", content: [
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: thumb.slice(23) } },
+      { type: "text", text: `作品名稱：${title || "（沒有寫）"}` },
+    ] }],
+  };
+  try {
+    let r = await islAskClaude(body, true);
+    if (r.status === 400) r = await islAskClaude(body, false); /* 萬一 fallbacks 跟結構化輸出不能一起用，就不帶再試一次 */
+    if (!r.ok) { islAiLastErr = JSON.stringify(r.j).slice(0, 300); console.error("作品島藝術家留言失敗：", islAiLastErr); return islFallbackComment(title); }
+    if (r.j.stop_reason === "refusal" || r.j.stop_reason === "max_tokens") { islAiLastErr = "stop_reason=" + r.j.stop_reason; return islFallbackComment(title); }
+    const txt = (r.j.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
+    const o = JSON.parse(txt);
+    const a = ISL_ARTISTS.some((x) => x.n === o.artist) ? o.artist : ISL_ARTISTS[Math.floor(Math.random() * ISL_ARTISTS.length)].n;
+    const t = String(o.comment || "").replace(/\s+/g, " ").trim().slice(0, 90);
+    if (!t) return islFallbackComment(title);
+    return { a, t, ai: true };
+  } catch (e) {
+    islAiLastErr = e.message; console.error("作品島藝術家留言錯誤：", e.message);
+    return islFallbackComment(title);
+  }
+}
+let islAiLastErr = "";
+const islCmBusy = new Set(), islCmDaily = new Map();
+/* 部署後確認 AI 真的有回應：每次開機只跑一次（拿島上第一件作品的縮圖，不存檔），之後都回同一個結果，不會被亂按花錢 */
+let islAiCheck = null;
+app.get("/island/ai-check", async (req, res) => {
+  try {
+    if (!islAiCheck) islAiCheck = (async () => {
+      const hs = await fbGet("island/houses");
+      let wid = null, title = "";
+      for (const h of Object.values(hs || {})) { const e = Object.entries((h && h.works) || {})[0]; if (e) { wid = e[0]; title = e[1].title || ""; break; } }
+      if (!wid) return { ok: false, error: "島上還沒有作品" };
+      const thumb = await fbGet(`island/img/${wid}/t`);
+      const cm = await islAiComment(String(thumb || ""), title);
+      return { ok: true, ai: cm.ai, a: cm.a, t: cm.t, err: cm.ai ? "" : islAiLastErr, keySet: !!ANTHROPIC_API_KEY };
+    })();
+    res.set("Cache-Control", "no-store"); res.json(await islAiCheck);
+  } catch (e) { gErr(res, e); }
+});
+app.post("/island/comment", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { who, staff, key } = await islWho(body);
+    const wid = String(body.id || ""), hid = String(body.house || "");
+    if (!/^w[\w]{4,30}$/.test(wid) || !/^h[\w]{4,30}$/.test(hid)) throw islErr("找不到這件作品", "BAD_ID");
+    const mine = key ? await fbGet(`island/owner/${key}`) : null;
+    if (hid !== mine && !staff) throw islErr("只有屋主可以請藝術家來看", "NOT_YOURS");
+    const w = await fbGet(`island/houses/${hid}/works/${wid}`);
+    if (!w) throw islErr("找不到這件作品", "BAD_ID");
+    if (w.cm && w.cm.a && w.cm.t) return res.json({ ok: true, a: w.cm.a, t: w.cm.t, existed: true });
+    if (islCmBusy.has(wid)) throw islErr("藝術家正在看這件作品，等一下再看看", "BUSY");
+    const dk = who.uid + "|" + gDay(), n = (islCmDaily.get(dk) || 0) + 1;
+    if (n > 40 && !staff) throw islErr("今天藝術家們看了很多作品，明天再來請他們看吧", "TOO_MANY");
+    islCmBusy.add(wid);
+    try {
+      const thumb = await fbGet(`island/img/${wid}/t`);
+      const cm = typeof thumb === "string" && thumb.startsWith("data:image/jpeg;base64,") ? await islAiComment(thumb, w.title || "") : islFallbackComment(w.title || "");
+      await fbPut(`island/houses/${hid}/works/${wid}/cm`, { ...cm, ts: Date.now() });
+      islCmDaily.set(dk, n); if (islCmDaily.size > 5000) islCmDaily.clear();
+      islDirty();
+      res.json({ ok: true, a: cm.a, t: cm.t });
+    } finally { islCmBusy.delete(wid); }
+  } catch (e) { gErr(res, e); }
+});
+/* 員工刪掉不適合的藝術家留言（刪了之後屋主可以再請一次） */
+app.post("/island/comment/del", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { staff } = await islWho(body);
+    if (!staff) throw islErr("只有老師可以刪留言", "NOT_STAFF");
+    const wid = String(body.id || ""), hid = String(body.house || "");
+    if (!/^w[\w]{4,30}$/.test(wid) || !/^h[\w]{4,30}$/.test(hid)) throw islErr("找不到這件作品", "BAD_ID");
+    await fbDel(`island/houses/${hid}/works/${wid}/cm`);
     islDirty();
     res.json({ ok: true });
   } catch (e) { gErr(res, e); }
