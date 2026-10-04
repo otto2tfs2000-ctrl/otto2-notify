@@ -1432,6 +1432,22 @@ app.post("/staff/members", async (req, res) => {
   }
 });
 
+/* ══ 單一會員完整資料（員工限定，2026-10-04）══
+   members 的 .read 要關掉，後台原本直接讀 /members/{phone} 的地方改問這裡。
+   body: { token, phone }，回 { member: 整筆資料或 null } */
+app.post("/staff/member", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const phone = String((req.body || {}).phone || "").replace(/[^0-9]/g, "").replace(/^886/, "0");
+    if (!phone) return res.json({ ok: true, member: null });
+    res.json({ ok: true, member: (await fbGet(`members/${phone}`)) || null });
+  } catch (e) {
+    console.error("/staff/member 失敗：", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 /* ══ 找回會員的 LINE（2026-10-04）══
    大熊回報：客人明明用 LINE 開過預約頁，後台卻說「還沒綁定 LINE」。
    原因：/liff/member 只有在會員檔案「已經存在」時才寫 lineUserId；
@@ -2422,10 +2438,15 @@ async function gAddTicket(phone, name, t, cfg, gid) {
 async function gEnsureMember(phone, name) {
   const m = await fbGet(`members/${phone}`, { shallow: "true" });
   if (m) return;
-  await fbPut(`members/${phone}`, {
+  /* 新建檔時順手掛上玩扭蛋的 LINE（2026-10-04）。以前只在「會員檔已存在」時綁，
+     第一次來的新客輸入電話當下還沒有會員檔，等抽到東西才建檔，LINE 就漏掉了。 */
+  const pl = await fbGet(`gacha/players/${phone}`);
+  const rec = {
     phone, name: name || "", createdAt: new Date().toISOString(),
     cache: { points: 0, sessions: 0, bonus: 0 }, source: "gacha", note: "扭蛋活動自動建立",
-  });
+  };
+  if (pl && pl.uid) rec.lineUserId = pl.uid;
+  await fbPut(`members/${phone}`, rec);
 }
 
 function gPick(pool) {
