@@ -1432,6 +1432,44 @@ app.post("/staff/members", async (req, res) => {
   }
 });
 
+/* ══ 找回會員的 LINE（2026-10-04）══
+   大熊回報：客人明明用 LINE 開過預約頁，後台卻說「還沒綁定 LINE」。
+   原因：/liff/member 只有在會員檔案「已經存在」時才寫 lineUserId；
+   第一次來的新客開頁面時還沒建檔，LINE 只記在 lineIndex／liffProfiles／預約單，
+   之後行政幫他建檔，會員檔案就永遠缺 lineUserId。
+   後台看到沒綁定時打這支：從 lineIndex 反查、再看他的線上預約單，
+   找到就補寫回會員檔案（只補空的，不蓋掉已綁的）。
+   lineIndex 規則鎖住了，瀏覽器讀不到，所以要伺服器來查。
+   body: { token, phone } */
+app.post("/staff/member-line", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const phone = String((req.body || {}).phone || "").replace(/[^0-9]/g, "").replace(/^886/, "0");
+    if (!/^0\d{8,10}$/.test(phone)) return res.json({ ok: true, lineUserId: "" });
+    const m = await fbGet(`members/${phone}`);
+    if (m && m.lineUserId) return res.json({ ok: true, lineUserId: m.lineUserId });
+    let uid = "";
+    const idx = await fbGet("lineIndex");
+    for (const u in (idx || {})) { if (idx[u] === phone) { uid = u; break; } }
+    if (!uid) {
+      const bk = await fbGet("bookings");
+      for (const k in (bk || {})) {
+        const b = bk[k];
+        if (!b || !b.line || !b.line.userId) continue;
+        const p = String(b.memberPhone || (b.customer && b.customer.phone) || "")
+          .replace(/[^0-9]/g, "").replace(/^886/, "0");
+        if (p === phone) { uid = b.line.userId; break; }
+      }
+    }
+    if (uid && m) await fbPatch(`members/${phone}`, { lineUserId: uid });
+    res.json({ ok: true, lineUserId: uid });
+  } catch (e) {
+    console.error("/staff/member-line 失敗：", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 /* ══ 只有管理員能過的關卡 ══
    先過 requireStaff（憑證有效、名單裡有、沒被停用），再檢查身分。 */
 async function requireOwner(req, res) {
