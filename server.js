@@ -461,7 +461,9 @@ app.post("/notify/booking", async (req, res) => {
        邏輯放回來就好，不用重寫。 */
     const payButton = null;
     const depNote =
-      dep.method === "points"
+      dep.hold
+        ? "已使用你先前預付的訂金，不用再付款，當天見！"
+        : dep.method === "points"
         ? "我們將為你預扣點數，小編確認後會再回覆你。"
         : dep.method === "transfer"
         ? "請完成匯款後，將帳號末五碼回傳 LINE，小編確認後預約才算保留成功。"
@@ -1591,6 +1593,63 @@ app.post("/staff/applink", async (req, res) => {
 /* 這個 LINE 帳號在我們這裡的狀態：來過幾次、有沒有方案、留過什麼聯絡方式。
    來訪次數決定體驗價資格，所以要準。
    body: { userId } */
+/* ══ 先收訂金、還沒排課（2026-10-04）══
+   後台「＋先收訂金（還沒約時間）」記在 otto2-2026/deposits（hold:true、bookingId 空）。
+   以前只有後台看得到，家長自己查不到，忘了就沒人提醒排時間。
+   /liff/hold      預約頁打電話時問：這支電話有沒有待排課的訂金（只回金額、日期，不回姓名）
+   /liff/hold/use  客人線上約好之後，把訂金掛到那筆預約上（跟後台「排時間」寫的欄位一樣） */
+async function holdsOf(phone) {
+  const all = (await staffGet("deposits")) || {};
+  return Object.keys(all).map((id) => ({ id, ...(all[id] || {}) }))
+    .filter((h) => h.hold && !h.bookingId && !h.voided && normPhone(h.phone) === phone)
+    .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+}
+app.post("/liff/hold", async (req, res) => {
+  try {
+    const phone = normPhone((req.body || {}).phone);
+    if (!/^0\d{8,10}$/.test(phone)) return res.json({ ok: true, holds: [] });
+    const list = await holdsOf(phone);
+    res.json({ ok: true, holds: list.map((h) => ({
+      id: h.id, amount: Number(h.amount) || 0, date: h.date || "",
+      people: (Number(h.adults) || 0) + (Number(h.kids) || 0),
+    })) });
+  } catch (e) {
+    console.error("/liff/hold 失敗：", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+app.post("/liff/hold/use", async (req, res) => {
+  try {
+    const { holdId, bookingId } = req.body || {};
+    if (!holdId || !bookingId) return res.status(400).json({ ok: false, error: "缺少資料" });
+    const b = await fbGet(`bookings/${bookingId}`);
+    if (!b) return res.status(404).json({ ok: false, error: "找不到預約" });
+    const h = await staffGet(`deposits/${holdId}`);
+    if (!h || !h.hold || h.voided) return res.status(404).json({ ok: false, error: "找不到這筆訂金" });
+    if (h.bookingId) return res.json({ ok: h.bookingId === bookingId, error: "這筆訂金已經用在別的預約" });
+    /* 一定要同一支電話，不然拿別人的電話就能把人家的訂金挪來用 */
+    if (normPhone(h.phone) !== normPhone((b.customer && b.customer.phone) || b.memberPhone)) {
+      return res.status(403).json({ ok: false, error: "電話對不上" });
+    }
+    const now = new Date().toISOString();
+    const wayName = { linepay: "LINE Pay", transfer: "銀行匯款", cash: "現金", card: "刷卡" }[h.way] || h.wayName || h.way || "";
+    await fbPatch(`bookings/${bookingId}/deposit`, {
+      method: h.way || "other", name: wayName, amount: Number(h.amount) || 0,
+      status: "paid", paidWay: h.way || "", paidDate: h.date || "", paidAt: h.at || now,
+      last5: h.last5 || "", by: h.by || "", logId: holdId, hold: true,
+    });
+    await fetch(staffUrl(`deposits/${holdId}`), {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bookingId, classDate: b.date || "", slot: b.slot || "",
+        scheduledAt: now, scheduledBy: "客人線上預約" }),
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("/liff/hold/use 失敗：", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.post("/liff/me", async (req, res) => {
   try {
     const uid = String((req.body || {}).userId || "").trim();
