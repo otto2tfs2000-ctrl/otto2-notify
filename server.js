@@ -3738,6 +3738,7 @@ function islPublic(raw) {
   const houses = Object.entries(raw.houses || {}).filter(([, h]) => h && h.name).map(([id, h]) => ({
     id, name: h.name, style: h.style, since: h.since, ts: h.ts || 0, staff: !!h.staff,
     pet: h.pet && h.pet.b ? { b: h.pet.b, c: h.pet.c, n: h.pet.n || "", love: Number(h.pet.love) || 0 } : null,
+    frog: h.frog && h.frog.b ? { b: h.frog.b, c: h.frog.c, n: h.frog.n || "", love: Number(h.frog.love) || 0 } : null,
     works: Object.entries(h.works || {}).map(([wid, w]) => ({ id: wid, title: w.title || "", date: w.date || "", by: w.by || "", ts: w.ts || 0,
       cm: w.cm && w.cm.a && w.cm.t ? { a: w.cm.a, t: w.cm.t } : null, rx: islRxCount(w.rx) }))
       .sort((a, b) => a.ts - b.ts),
@@ -3823,6 +3824,10 @@ app.post("/island/join", async (req, res) => {
 /* 小屋認養天竺鼠（2026-10-05 大熊要的）：蓋到 3 樓（8 件作品）可以認養一隻；品種只能選一次，花色、名字可以改；只有屋主能動自己家的（老師也不能改別人家的） */
 const GP_BREEDS = ["american", "crested", "abyssinian", "teddy", "peruvian", "texel", "sheltie", "skinny"];
 const GP_COLORS = ["cream", "caramel", "choco", "grey", "bw", "tri", "white", "gold"];
+/* 2026-10-05 也可以認養青蛙（大熊：一樣蓋到 3 樓）：跟天竺鼠分開存在 houses/{hid}/frog，兩隻都能養；b＝種類（只能選一次） */
+const FR_SPECIES = ["horned", "tomato", "redeye", "dart", "whites", "painted", "moltrecht", "milk"];
+const FR_COLORS = ["green", "gold", "strawberry", "snow", "sky", "caramel", "grape", "tomato", "mint"];
+const petKind = (body) => (body && body.kind === "frog" ? "frog" : "pet");
 app.post("/island/pet", async (req, res) => {
   try {
     const body = req.body || {};
@@ -3831,21 +3836,23 @@ app.post("/island/pet", async (req, res) => {
     const mine = key ? await fbGet(`island/owner/${key}`) : null;
     const hid = typeof mine === "string" ? mine : "";
     if (!/^h[\w]{4,30}$/.test(hid)) throw islErr("你還沒有小屋", "NO_HOUSE");
-    if (body.house && String(body.house) !== hid) throw islErr("只能照顧自己家的天竺鼠", "NOT_YOURS");
+    const kind = petKind(body), frog = kind === "frog", what = frog ? "青蛙" : "天竺鼠";
+    if (body.house && String(body.house) !== hid) throw islErr(`只能照顧自己家的${what}`, "NOT_YOURS");
     const h = await fbGet(`island/houses/${hid}`);
     if (!h || !h.ts) throw islErr("找不到這間小屋", "BAD_ID");
     const n = Object.keys(h.works || {}).length;
     if (n < 8) throw islErr(`小屋蓋到 3 樓（8 件作品）才能認養，現在 ${n} 件`, "NOT_YET");
     const c = String(body.c || ""), name = String(body.n || "").trim().slice(0, 8);
     let b = String(body.b || "");
-    if (h.pet && h.pet.b) b = h.pet.b; /* 品種只能選一次 */
-    if (!GP_BREEDS.includes(b)) throw islErr("請選一個品種", "BAD_BREED");
-    if (!GP_COLORS.includes(c)) throw islErr("請選一個花色", "BAD_COLOR");
+    const old = h[kind];
+    if (old && old.b) b = old.b; /* 品種／種類只能選一次 */
+    if (!(frog ? FR_SPECIES : GP_BREEDS).includes(b)) throw islErr(frog ? "請選一種青蛙" : "請選一個品種", "BAD_BREED");
+    if (!(frog ? FR_COLORS : GP_COLORS).includes(c)) throw islErr(frog ? "請選一個顏色" : "請選一個花色", "BAD_COLOR");
     if (!name) throw islErr("幫牠取個名字吧", "NO_NAME");
-    const pet = { b, c, n: name, since: (h.pet && h.pet.since) || Date.now(), ts: Date.now(), love: Number(h.pet && h.pet.love) || 0, ld: (h.pet && h.pet.ld) || {} };
-    await fbPut(`island/houses/${hid}/pet`, pet);
+    const pet = { b, c, n: name, since: (old && old.since) || Date.now(), ts: Date.now(), love: Number(old && old.love) || 0, ld: (old && old.ld) || {} };
+    await fbPut(`island/houses/${hid}/${kind}`, pet);
     islDirty();
-    res.json({ ok: true, house: hid, pet: { b, c, n: name } });
+    res.json({ ok: true, house: hid, kind, pet: { b, c, n: name } });
   } catch (e) { gErr(res, e); }
 });
 
@@ -3858,14 +3865,15 @@ app.post("/island/pet/love", async (req, res) => {
     if (typeof hid !== "string") throw islErr("你還沒有小屋", "NO_HOUSE");
     const why = String(body.why || "");
     if (!["pet", "feed", "play"].includes(why)) throw islErr("不認得這個動作", "BAD_WHY");
-    const pet = await fbGet(`island/houses/${hid}/pet`);
-    if (!pet || !pet.b) throw islErr("還沒有認養天竺鼠", "NO_PET");
+    const kind = petKind(body);
+    const pet = await fbGet(`island/houses/${hid}/${kind}`);
+    if (!pet || !pet.b) throw islErr(kind === "frog" ? "還沒有認養青蛙" : "還沒有認養天竺鼠", "NO_PET");
     const day = gDay(), ld = pet.ld || {};
     let love = Number(pet.love) || 0, added = false;
     if (ld[why] !== day) {
       love += 1; added = true;
-      await fbPut(`island/houses/${hid}/pet/love`, love);
-      await fbPut(`island/houses/${hid}/pet/ld/${why}`, day);
+      await fbPut(`island/houses/${hid}/${kind}/love`, love);
+      await fbPut(`island/houses/${hid}/${kind}/ld/${why}`, day);
       islDirty();
     }
     res.json({ ok: true, love, added, done: { pet: (why === "pet" && added) || ld.pet === day, feed: (why === "feed" && added) || ld.feed === day, play: (why === "play" && added) || ld.play === day } });
