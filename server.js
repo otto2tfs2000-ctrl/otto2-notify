@@ -4014,8 +4014,8 @@ app.post("/island/rename", async (req, res) => {
   } catch (e) { gErr(res, e); }
 });
 
-/* 上傳：會員只能放自己家；員工可以放任何一間或大樹相簿。一個人一天最多 30 張 */
-const islDaily = new Map();
+/* 上傳：會員只能放自己家；員工可以放任何一間或大樹相簿。一個人一天最多 12 張（員工不限） */
+const ISL_UP_PER_DAY = 12;
 app.post("/island/upload", async (req, res) => {
   try {
     const body = req.body || {};
@@ -4023,8 +4023,9 @@ app.post("/island/upload", async (req, res) => {
     const f = String(body.full || ""), t = String(body.thumb || "");
     const okImg = (s, max) => s.startsWith("data:image/jpeg;base64,") && s.length < max;
     if (!okImg(f, 900000) || !okImg(t, 120000)) throw islErr("照片格式不對，請換一張再試", "BAD_IMG");
-    const dk = who.uid + "|" + gDay(), n = (islDaily.get(dk) || 0) + 1;
-    if (n > 30 && !staff) throw islErr("今天上傳很多了，明天再繼續放吧", "TOO_MANY");
+    /* 2026-10-06 大熊：一人一天最多 12 張（員工不限），免得大家只在比誰的房子蓋得高 */
+    const upN = staff ? 0 : (Number(await fbGet(`${islDayPath(who.uid)}/up`)) || 0) + 1;
+    if (upN > ISL_UP_PER_DAY) throw islErr("你的房子蓋得這麼快很危險！今天先休息，明天再繼續蓋吧。", "TOO_FAST");
     let path;
     if (body.target === "album") {
       if (!staff) throw islErr("只有老師可以放大樹相簿", "NOT_STAFF");
@@ -4043,10 +4044,9 @@ app.post("/island/upload", async (req, res) => {
     const d = gDay();
     await fbPut(`${path}/${wid}`, { title: String(body.title || "").trim().slice(0, 30), date: d.slice(0, 7).replace("-", "/"),
       by: body.target === "album" ? "老師" : (staff && body.target ? "老師" : "本人"), uid: who.uid, ts: Date.now() });
-    islDaily.set(dk, n);
-    if (islDaily.size > 5000) islDaily.clear();
+    if (!staff) await fbPut(`${islDayPath(who.uid)}/up`, upN);
     islDirty();
-    res.json({ ok: true, id: wid });
+    res.json({ ok: true, id: wid, left: staff ? null : ISL_UP_PER_DAY - upN });
   } catch (e) { gErr(res, e); }
 });
 
@@ -4119,16 +4119,26 @@ const ISL_ARTISTS = [
   { n: "馬格利特", s: "超現實主義；平常的東西放在奇怪的地方、藍天白雲、蘋果、帽子、像謎題" },
   { n: "葛飾北齋", s: "浮世繪；海浪、山、風景、藍色、線條清楚" },
 ];
-const ISL_FALLBACK = [
-  (t) => `${t}的顏色好有精神，我站在旁邊看了好久！`,
-  (t) => `我很喜歡${t}，看得出來你畫得很用心。`,
-  (t) => `${t}讓我也想拿起畫筆了，繼續畫下去吧！`,
-  (t) => `這張好特別！${t}裡藏著你自己的想法，真棒。`,
-];
+/* 固定台詞（2026-10-06 大熊：一天只有 3 則真的 AI 留言，其他都用這裡的，不花錢）
+   每位島民 5 句，只講心意、不描述畫面（因為沒有真的看圖）；{t} 換成《作品名》或「這張畫」
+   草間彌生 2026-08 剛過世，固定台詞先不用她的口吻 */
+const ISL_FIXED = {
+  "梵谷": ["我站在你的畫前面看了好久，好有力氣，像麥田上的太陽！", "看得出來你畫得很用心。我也是每天畫，畫到手痠都捨不得停。", "{t}讓我想起亞爾暖暖的陽光。繼續畫，你會越畫越亮！", "我以前也常覺得自己畫不好，可是一直畫下去就對了。你做得很棒！", "這張我好想偷偷寄給我弟弟西奧看，他一定也會喜歡。"],
+  "莫內": ["你的畫讓我想到早上的花園，光一照進來，什麼都變得好溫柔。", "{t}好舒服，我想把它掛在睡蓮池旁邊的小屋裡。", "我畫同一座池塘畫了好多年，你也要像這樣一直畫下去喔！", "我最喜歡看光線怎麼變。下次可以試試早上和傍晚各畫一次！", "看到這張畫，我的心情就像晴天一樣好。"],
+  "達利": ["太棒了！這張畫讓我的鬍子都翹起來了！", "{t}裡藏著一個夢，只有很勇敢的人才畫得出來。", "我的時鐘看到這張畫，都高興得融化了。", "誰說畫畫要照規矩？你這樣畫就很有自己的味道！", "我宣布：這是今天島上最讓我驚喜的作品之一！"],
+  "克林姆": ["這張畫好有光彩，我想幫它鑲上一圈金邊。", "{t}讓我看得好入迷，每個角落都值得慢慢看。", "我喜歡用很多花紋裝飾畫面，你下次也可以試試加一點圖案喔。", "用心畫出來的畫會自己發光，就像這一張。", "這張畫好溫暖，像被金色的陽光抱著。"],
+  "米羅": ["哇！這張畫讓我想跟星星一起跳舞！", "我最喜歡像小孩一樣自由地畫畫，你就做到了！", "{t}好有活力，看著看著我也想拿起筆亂畫一通！", "畫畫不用想太多，跟著心情畫就對了，你畫得好開心的樣子！", "我要把這張畫的感覺，偷偷畫進我的下一張星空裡。"],
+  "卡蘿": ["這張畫裡有你的心意，我看得出來。真了不起！", "我躺在床上的時候也一直畫畫。不管怎樣，都要繼續畫下去喔！", "{t}好有生命力，像我家院子裡的花一樣。", "畫出自己心裡的東西，是最勇敢的事。你做到了！", "我的小猴子看到這張畫，開心得一直拍手。"],
+  "達文西": ["我仔細看了這張畫，看得出你畫的時候很認真在觀察。", "{t}讓我好想把它記進我的筆記本裡。", "好的畫家都很會觀察，你一定也是！下次可以試試畫一片葉子的細節。", "我畫一幅畫常常花好幾年，你這樣一張一張完成，真不簡單。", "這張畫讓我好好奇，你是怎麼想到的呢？"],
+  "畢卡索": ["好大膽！我就喜歡敢畫的人！", "{t}有你自己的樣子，這比畫得像更重要。", "我花了一輩子學怎麼像小孩一樣畫畫，你已經會了！", "我的白鴿看到這張畫，也想飛進去看看。", "繼續畫！最好的作品永遠是下一張。"],
+  "林布蘭": ["這張畫讓我的畫室都亮起來了。", "{t}看起來好溫暖，像傍晚窗邊的光。", "我畫了很多自畫像，每一張都在認識自己。你也在畫畫裡認識自己喔！", "看得出來你一筆一筆都很用心，這是最重要的。", "下次可以試試讓畫裡有亮的地方、也有暗的地方，會很神奇喔。"],
+  "馬格利特": ["這不是一張普通的畫，這是一個謎題，我很喜歡。", "{t}讓我想戴上圓頂帽，好好研究一下。", "我喜歡把平常的東西變得不平常，你也有這種魔法！", "看著看著，我的蘋果都忘記要擋住我的臉了。", "畫畫就是讓大家用新的眼睛看世界，你做到了。"],
+  "葛飾北齋": ["我畫了一輩子還在學，看到你這麼認真，我也要加油了！", "{t}好有精神，像富士山前面的大浪一樣。", "我九十歲還在練習。只要一直畫，你會越來越厲害！", "我改過三十幾次名字，每次都像重新開始。你每一張畫也是新的開始！", "我搬過九十幾次家，這次好想搬到你的小屋旁邊。"],
+};
 function islFallbackComment(title) {
-  const a = ISL_ARTISTS[Math.floor(Math.random() * ISL_ARTISTS.length)].n;
-  const t = title ? `《${title}》` : "這件作品";
-  return { a, t: ISL_FALLBACK[Math.floor(Math.random() * ISL_FALLBACK.length)](t), ai: false };
+  const names = Object.keys(ISL_FIXED), a = names[Math.floor(Math.random() * names.length)];
+  const lines = ISL_FIXED[a], t = title ? `《${title}》` : "這張畫";
+  return { a, t: lines[Math.floor(Math.random() * lines.length)].replace("{t}", t), ai: false };
 }
 const ISL_CM_SYSTEM = `你是 OTTO2 兒童美術教室「作品島」上的藝術家島民。小朋友（或大人學員）上傳了一件自己的作品照片，請你：
 1. 從下面的島民裡，挑一位「風格、主題、顏色」跟這件作品最像的藝術家來看這幅畫。真的看不出像誰，就挑你覺得最適合鼓勵他的。
@@ -4162,7 +4172,7 @@ async function islAskClaude(body, withFallback) {
 async function islAiComment(thumb, title) {
   if (!ANTHROPIC_API_KEY) return islFallbackComment(title);
   const body = {
-    model: "claude-opus-5-5",
+    model: "claude-sonnet-5-5", /* 2026-10-06 大熊嫌 Opus 貴，改 Sonnet 5.5（約一半以下） */
     max_tokens: 4000,
     system: ISL_CM_SYSTEM,
     output_config: { effort: "low", format: { type: "json_schema", schema: ISL_CM_SCHEMA } },
@@ -4176,6 +4186,7 @@ async function islAiComment(thumb, title) {
     if (r.status === 400) r = await islAskClaude(body, false); /* 萬一 fallbacks 跟結構化輸出不能一起用，就不帶再試一次 */
     if (!r.ok) { islAiLastErr = JSON.stringify(r.j).slice(0, 300); console.error("作品島藝術家留言失敗：", islAiLastErr); return islFallbackComment(title); }
     if (r.j.stop_reason === "refusal" || r.j.stop_reason === "max_tokens") { islAiLastErr = "stop_reason=" + r.j.stop_reason; return islFallbackComment(title); }
+    islAddSpend(r.j.usage);
     const txt = (r.j.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
     const o = JSON.parse(txt);
     const a = ISL_ARTISTS.some((x) => x.n === o.artist) ? o.artist : ISL_ARTISTS[Math.floor(Math.random() * ISL_ARTISTS.length)].n;
@@ -4188,7 +4199,24 @@ async function islAiComment(thumb, title) {
   }
 }
 let islAiLastErr = "";
-const islCmBusy = new Set(), islCmDaily = new Map();
+const islCmBusy = new Set();
+/* 2026-10-06 省錢規則（大熊定的）：
+   - 每人每天最多 3 則真的 AI 留言（員工不限），超過就用固定台詞
+   - 一次上傳好幾張，只有最後一張請 AI，其他前端會帶 fixed:true 直接用固定台詞
+   - 每月 AI 留言花費上限 NT$200，到了就全部用固定台詞，下個月 1 號自動恢復
+   - 次數和花費存 Firebase（island/daily、island/aiSpend），重開機不會歸零 */
+const ISL_AI_PER_DAY = 3, ISL_AI_MONTH_NTD = 200, USD_NTD = 32;
+const ISL_PRICE = { in: 2 / 1e6, out: 10 / 1e6, cacheRead: 0.2 / 1e6 }; /* Sonnet 5.5 每 token 美金 */
+const islMonth = () => gDay().slice(0, 7);
+async function islSpent() { return Number(await fbGet(`island/aiSpend/${islMonth()}/cm`)) || 0; }
+async function islAddSpend(u) {
+  if (!u) return;
+  const usd = (u.input_tokens || 0) * ISL_PRICE.in + (u.cache_creation_input_tokens || 0) * ISL_PRICE.in * 1.25
+    + (u.cache_read_input_tokens || 0) * ISL_PRICE.cacheRead + (u.output_tokens || 0) * ISL_PRICE.out;
+  try { const now = await islSpent(); await fbPut(`island/aiSpend/${islMonth()}/cm`, Math.round((now + usd * USD_NTD) * 1000) / 1000); }
+  catch (e) { console.error("作品島記花費失敗：", e.message); }
+}
+const islDayPath = (uid) => `island/daily/${gDay()}/${String(uid).replace(/[.#$\[\]\/]/g, "_")}`;
 /* 部署後確認 AI 真的有回應：每次開機只跑一次（拿島上第一件作品的縮圖，不存檔），之後都回同一個結果，不會被亂按花錢 */
 let islAiCheck = null;
 app.get("/island/ai-check", async (req, res) => {
@@ -4217,14 +4245,17 @@ app.post("/island/comment", async (req, res) => {
     if (!w) throw islErr("找不到這件作品", "BAD_ID");
     if (w.cm && w.cm.a && w.cm.t) return res.json({ ok: true, a: w.cm.a, t: w.cm.t, existed: true });
     if (islCmBusy.has(wid)) throw islErr("藝術家正在看這件作品，等一下再看看", "BUSY");
-    const dk = who.uid + "|" + gDay(), n = (islCmDaily.get(dk) || 0) + 1;
-    if (n > 40 && !staff) throw islErr("今天藝術家們看了很多作品，明天再來請他們看吧", "TOO_MANY");
     islCmBusy.add(wid);
     try {
-      const thumb = await fbGet(`island/img/${wid}/t`);
-      const cm = typeof thumb === "string" && thumb.startsWith("data:image/jpeg;base64,") ? await islAiComment(thumb, w.title || "") : islFallbackComment(w.title || "");
+      let cm;
+      const usedAi = staff ? 0 : Number(await fbGet(`${islDayPath(who.uid)}/ai`)) || 0;
+      const useAi = !body.fixed && (staff || usedAi < ISL_AI_PER_DAY) && (await islSpent()) < ISL_AI_MONTH_NTD;
+      if (useAi) {
+        const thumb = await fbGet(`island/img/${wid}/t`);
+        cm = typeof thumb === "string" && thumb.startsWith("data:image/jpeg;base64,") ? await islAiComment(thumb, w.title || "") : islFallbackComment(w.title || "");
+        if (cm.ai && !staff) await fbPut(`${islDayPath(who.uid)}/ai`, usedAi + 1);
+      } else cm = islFallbackComment(w.title || "");
       await fbPut(`island/houses/${hid}/works/${wid}/cm`, { ...cm, ts: Date.now() });
-      islCmDaily.set(dk, n); if (islCmDaily.size > 5000) islCmDaily.clear();
       islDirty();
       res.json({ ok: true, a: cm.a, t: cm.t });
     } finally { islCmBusy.delete(wid); }
