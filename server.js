@@ -3738,7 +3738,7 @@ function islPublic(raw) {
   const houses = Object.entries(raw.houses || {}).filter(([, h]) => h && h.name).map(([id, h]) => ({
     id, name: h.name, style: h.style, since: h.since, ts: h.ts || 0, staff: !!h.staff,
     works: Object.entries(h.works || {}).map(([wid, w]) => ({ id: wid, title: w.title || "", date: w.date || "", by: w.by || "", ts: w.ts || 0,
-      cm: w.cm && w.cm.a && w.cm.t ? { a: w.cm.a, t: w.cm.t } : null }))
+      cm: w.cm && w.cm.a && w.cm.t ? { a: w.cm.a, t: w.cm.t } : null, rx: islRxCount(w.rx) }))
       .sort((a, b) => a.ts - b.ts),
   })).sort((a, b) => a.ts - b.ts);
   const album = Object.entries(raw.album || {}).map(([wid, w]) => ({ id: wid, title: w.title || "", date: w.date || "", ts: w.ts || 0 }))
@@ -4023,6 +4023,63 @@ app.post("/island/comment/del", async (req, res) => {
     await fbDel(`island/houses/${hid}/works/${wid}/cm`);
     islDirty();
     res.json({ ok: true });
+  } catch (e) { gErr(res, e); }
+});
+
+/* ══════════════════════════════════════════════════════════
+   作品小屋：訪客按讚／愛心／小花（2026-10-05 大熊要的）
+   - 每件作品三種，有 LINE 登入的人才能按；每人每件每種一次，再按一次取消
+   - 大家只看到數字；屋主（和老師）點開看得到是誰按的（有小屋就顯示小屋名字，沒有就用 LINE 名字）
+   - 存在 island/houses/{hid}/works/{wid}/rx/{uid} = {l, h, f, n, ts}
+   ══════════════════════════════════════════════════════════ */
+const ISL_RX = ["l", "h", "f"];
+function islRxCount(rx) {
+  const c = { l: 0, h: 0, f: 0 };
+  Object.values(rx || {}).forEach((r) => { if (r) ISL_RX.forEach((k) => { if (r[k]) c[k]++; }); });
+  return c;
+}
+async function islRxView(hid, wid, uid, canSee) {
+  const rx = (await fbGet(`island/houses/${hid}/works/${wid}/rx`)) || {};
+  const me = rx[uid] || {};
+  const out = { ok: true, rx: islRxCount(rx), mine: { l: !!me.l, h: !!me.h, f: !!me.f } };
+  if (canSee) out.who = Object.values(rx).filter((r) => r && (r.l || r.h || r.f)).sort((a, b) => (b.ts || 0) - (a.ts || 0))
+    .map((r) => ({ n: r.n || "訪客", l: !!r.l, h: !!r.h, f: !!r.f }));
+  return out;
+}
+async function islRxCtx(body) {
+  const { who, staff, key } = await islWho(body);
+  const wid = String(body.id || ""), hid = String(body.house || "");
+  if (!/^w[\w]{4,30}$/.test(wid) || !/^h[\w]{4,30}$/.test(hid)) throw islErr("找不到這件作品", "BAD_ID");
+  const mine = key ? await fbGet(`island/owner/${key}`) : null;
+  return { who, staff, wid, hid, mine: typeof mine === "string" ? mine : null, canSee: staff || hid === mine };
+}
+/* 打開作品時拿：數字、我按過哪些、（屋主）誰按的 */
+app.post("/island/rx/get", async (req, res) => {
+  try {
+    const c = await islRxCtx(req.body || {});
+    res.json(await islRxView(c.hid, c.wid, c.who.uid, c.canSee));
+  } catch (e) { gErr(res, e); }
+});
+const islRxDaily = new Map();
+app.post("/island/rx", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const k = String(body.k || "");
+    if (!ISL_RX.includes(k)) throw islErr("不認得這個按鈕", "BAD_KIND");
+    const c = await islRxCtx(body);
+    const dk = c.who.uid + "|" + gDay(), n = (islRxDaily.get(dk) || 0) + 1;
+    if (n > 600) throw islErr("今天按太多次了，明天再來", "TOO_MANY");
+    islRxDaily.set(dk, n); if (islRxDaily.size > 5000) islRxDaily.clear();
+    if (!(await fbGet(`island/houses/${c.hid}/works/${c.wid}/ts`))) throw islErr("找不到這件作品", "BAD_ID");
+    const path = `island/houses/${c.hid}/works/${c.wid}/rx/${c.who.uid}`;
+    const cur = (await fbGet(path)) || {};
+    let name = c.who.displayName || "訪客";
+    if (c.mine) { const hn = await fbGet(`island/houses/${c.mine}/name`); if (typeof hn === "string" && hn) name = hn; }
+    const next = { l: !!cur.l, h: !!cur.h, f: !!cur.f, n: String(name).slice(0, 30), ts: Date.now() };
+    next[k] = !next[k];
+    if (!next.l && !next.h && !next.f) await fbDel(path); else await fbPut(path, next);
+    islDirty();
+    res.json(await islRxView(c.hid, c.wid, c.who.uid, c.canSee));
   } catch (e) { gErr(res, e); }
 });
 
