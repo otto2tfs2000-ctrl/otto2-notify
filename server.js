@@ -2387,7 +2387,8 @@ async function gIsStaff(uid) {
   if (hit && hit.until > Date.now()) return hit.v;
   let v = false;
   try { const st = await staffGet(`staff/${encodeURIComponent(uid)}`); v = !!(st && st.active !== false); } catch (e) {}
-  gStaffCache.set(uid, { v, until: Date.now() + 5 * 60000 });
+  /* 「不是員工」只記 30 秒：後台剛加進名單的人，重開頁面就能用（2026-10-05 草莓加完馬上試被擋） */
+  gStaffCache.set(uid, { v, until: Date.now() + (v ? 5 * 60000 : 30000) });
   return v;
 }
 async function gSim(cfg, phone, uid) {
