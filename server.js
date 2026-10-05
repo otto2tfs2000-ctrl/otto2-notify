@@ -2140,8 +2140,8 @@ app.get("/auth/ping", (_, res) => {
    ── 怎麼確認是本人 ──
    LINE userId 不是秘密，只收 userId 等於誰都能冒充別人來抽。
    改收 LIFF 的 access token，拿去問 LINE 這張 token 是不是發給我們
-   這個 LIFF（client_id 對得上）、是誰的。一個 LINE 帳號只能綁一支電話，
-   一支電話也只能被一個 LINE 帳號綁，綁過就改不了（要改請小編到後台處理）。
+   這個 LIFF（client_id 對得上）、是誰的。一個 LINE 帳號只能綁一支電話，綁過就改不了
+   （要改請小編到後台處理）。一支電話有一個主人，其他 LINE 要主人同意才能綁（家人共用）。
 
    ── 資料放哪裡（otto2-booking-f9ef7）──
    gacha/config          活動設定、獎品，後台「扭蛋活動」分頁改的就是這份
@@ -2335,6 +2335,8 @@ async function gLinkMember(uid, phone) {
   if (!uid || !phone || gLinked.has(uid)) return;
   gLinked.add(uid);
   try {
+    /* 家人共用的 LINE 不要變成會員檔的通知對象（通知要給買方案的家長） */
+    if (await fbGet(`gacha/players/${phone}/family/${uid}`)) return;
     const idx = await fbGet(`lineIndex/${uid}`);
     if (!idx) await fbPut(`lineIndex/${uid}`, phone);
     const m = await fbGet(`members/${phone}`);
@@ -2360,10 +2362,18 @@ async function gResolvePhone(who, body) {
   }
   if (!gValidPhone(want)) throw Object.assign(new Error("手機號碼格式不對，請輸入 09 開頭的 10 碼"), { code: "BAD_PHONE" });
   const pl = await fbGet(`gacha/players/${want}`);
-  if (pl && pl.uid && pl.uid !== who.uid) {
-    throw Object.assign(new Error("這支電話已經被另一個 LINE 帳號用來玩過了。如果是你本人，請私訊小編幫你處理"), { code: "PHONE_TAKEN" });
-  }
   const name = String(body.name || "").trim().slice(0, 20);
+  /* 這支電話的主人：玩過扭蛋的那個 LINE；沒玩過就看會員檔綁的 LINE。
+     不是主人的話走「家人共用」：主人同意過就直接綁，還沒同意就傳 LINE 去問 */
+  let owner = pl && pl.uid;
+  if (!owner) { const ml = await fbGet(`members/${want}/lineUserId`); if (typeof ml === "string" && ml) owner = ml; }
+  if (owner && owner !== who.uid) {
+    if (pl && pl.family && pl.family[who.uid]) {
+      await fbPut(`gacha/bind/${who.uid}`, want);
+      return { phone: want };
+    }
+    await gFamilyAsk(who, want, owner, name);
+  }
   await fbPut(`gacha/bind/${who.uid}`, want);
   await fbPatch(`gacha/players/${want}`, {
     uid: who.uid,
@@ -2374,6 +2384,110 @@ async function gResolvePhone(who, body) {
   gLinkMember(who.uid, want);
   return { phone: want };
 }
+
+/* ── 家人共用（2026-10-05）──
+   買方案的是家長，大孩子有自己的手機、自己的 LINE。孩子輸入家長的電話時，
+   傳 LINE 給這支電話的主人「○○ 想一起玩，同意嗎？」，家長按同意就綁上。
+   全家共用同一份：每天的次數、紅利上限、公仔圖鑑、走格子進度都算這支電話，
+   獎品照樣進家長的會員帳戶。主人之外最多 familyMax 個（預設 2，全家 3 個 LINE）。
+   gacha/famreq/{代碼}             申請：phone、uid（孩子）、owner（家長）、st wait/ok/no
+   gacha/players/{電話}/family/{uid} 同意過的家人 */
+const gFamCode = () => Array.from(crypto.randomBytes(9), (b) => "abcdefghjkmnpqrstuvwxyz23456789"[b % 31]).join("");
+const gFamMax = (cfg) => Math.max(0, Number(cfg.familyMax ?? 2));
+const gMaskPhone = (p) => String(p).slice(0, 4) + "***" + String(p).slice(-3);
+async function gFamilyAsk(who, phone, owner, name) {
+  const fam = (await fbGet(`gacha/players/${phone}/family`, { shallow: "true" })) || {};
+  if (Object.keys(fam).length >= gFamMax(await gConfig())) {
+    throw Object.assign(new Error("這支電話綁的家人已經滿了。要換人請私訊小編"), { code: "FAMILY_FULL" });
+  }
+  /* 同一個孩子 30 分鐘內只送一次，免得一直按一直傳 */
+  const prev = await fbGet(`gacha/famask/${who.uid}`);
+  if (prev && prev.phone === phone && Date.now() - prev.at < 30 * 60000) {
+    throw Object.assign(new Error("已經傳 LINE 請這支電話的家長同意了，家長按「同意」之後，重新打開就能玩"), { code: "FAMILY_SENT" });
+  }
+  const code = gFamCode();
+  await fbPut(`gacha/famreq/${code}`, { phone, uid: who.uid, owner, name, lineName: who.displayName || "", at: Date.now(), st: "wait" });
+  await fbPut(`gacha/famask/${who.uid}`, { phone, code, at: Date.now() });
+  const who2 = who.displayName ? `LINE「${who.displayName}」` : "有人";
+  try {
+    await push(owner, [{ type: "text", text:
+      `🎨 OTTO2 家人一起玩\n\n${who2}${name ? `（填的名字：${name}）` : ""}想用你的電話 ${gMaskPhone(phone)} 一起玩遊樂島的扭蛋、走格子。\n\n` +
+      `同意後全家共用同一份：每天的次數一起算，抽到的紅利、票券一樣存進你的帳戶。\n\n` +
+      `👉 點這裡同意或拒絕：\n${LIFF_URL}?go=family&c=${code}\n\n不認識這個人就不用理會喔。` }]);
+  } catch (e) {
+    console.error("家人共用推播失敗", e.message);
+    await fbDel(`gacha/famask/${who.uid}`);
+    throw Object.assign(new Error("這支電話已經綁定另一個 LINE，我們傳不了訊息給家長。請私訊小編幫你處理"), { code: "PHONE_TAKEN" });
+  }
+  throw Object.assign(new Error("這支電話已經有家長在玩了，我們剛剛傳 LINE 請家長同意。家長按「同意」之後，重新打開就能一起玩 🎉"), { code: "FAMILY_SENT" });
+}
+async function gFamReq(body, who) {
+  const code = String(body.code || "").replace(/[^a-z0-9]/g, "").slice(0, 20);
+  const r = code && (await fbGet(`gacha/famreq/${code}`));
+  if (!r || !r.phone) throw Object.assign(new Error("找不到這個邀請，可能已經過期了"), { code: "NO_REQ" });
+  /* 只有這支電話現在的主人能回答（申請之後主人換了也照現在的算） */
+  const owner = (await fbGet(`gacha/players/${r.phone}/uid`)) || (await fbGet(`members/${r.phone}/lineUserId`)) || r.owner;
+  if (owner !== who.uid) throw Object.assign(new Error("這個邀請要用這支電話主人的 LINE 打開才能回覆"), { code: "NOT_OWNER" });
+  return { code, r };
+}
+app.post("/gacha/family/info", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const who = await gWho(body.accessToken);
+    const { r } = await gFamReq(body, who);
+    res.json({ ok: true, st: r.st, lineName: r.lineName || "", name: r.name || "", phone: gMaskPhone(r.phone) });
+  } catch (e) { gErr(res, e); }
+});
+app.post("/gacha/family/answer", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const who = await gWho(body.accessToken);
+    const out = await gSerial(async () => {
+      const { code, r } = await gFamReq(body, who);
+      if (r.st !== "wait") return { st: r.st };
+      if (!body.yes) {
+        await fbPatch(`gacha/famreq/${code}`, { st: "no", ans: Date.now() });
+        return { st: "no" };
+      }
+      const fam = (await fbGet(`gacha/players/${r.phone}/family`, { shallow: "true" })) || {};
+      if (!fam[r.uid] && Object.keys(fam).length >= gFamMax(await gConfig())) {
+        throw Object.assign(new Error("這支電話綁的家人已經滿了。要換人請私訊小編"), { code: "FAMILY_FULL" });
+      }
+      const had = await fbGet(`gacha/bind/${r.uid}`);
+      if (typeof had === "string" && had && had !== r.phone) {
+        await fbPatch(`gacha/famreq/${code}`, { st: "other", ans: Date.now() });
+        return { st: "other" };
+      }
+      await fbPut(`gacha/players/${r.phone}/family/${r.uid}`, { name: r.name || "", lineName: r.lineName || "", at: new Date().toISOString() });
+      if (!(await fbGet(`gacha/players/${r.phone}/uid`))) await fbPatch(`gacha/players/${r.phone}`, { uid: who.uid });
+      await fbPut(`gacha/bind/${r.uid}`, r.phone);
+      await fbPatch(`gacha/famreq/${code}`, { st: "ok", ans: Date.now() });
+      await fbDel(`gacha/famask/${r.uid}`);
+      return { st: "ok", r };
+    });
+    if (out.st === "ok") {
+      push(out.r.uid, [{ type: "text", text: `🎉 家長同意了！現在可以用你自己的 LINE 一起玩遊樂島：\n${LIFF_URL}?go=gacha\n\n每天的次數是全家共用的喔。` }])
+        .catch((e) => console.error("家人共用通知孩子失敗", e.message));
+    }
+    res.json({ ok: true, st: out.st });
+  } catch (e) { gErr(res, e); }
+});
+/* 後台：看／移除某支電話的家人（打錯、換人時小編處理） */
+app.post("/staff/gacha/family", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const phone = normPhone((req.body || {}).phone || "");
+    if (!gValidPhone(phone)) throw Object.assign(new Error("電話格式不對"), { code: "BAD_PHONE" });
+    const rm = String((req.body || {}).remove || "");
+    if (rm) {
+      await fbDel(`gacha/players/${phone}/family/${rm}`);
+      if ((await fbGet(`gacha/bind/${rm}`)) === phone) await fbDel(`gacha/bind/${rm}`);
+      gLinked.delete(rm);
+    }
+    res.json({ ok: true, owner: await fbGet(`gacha/players/${phone}/uid`), family: (await fbGet(`gacha/players/${phone}/family`)) || {} });
+  } catch (e) { gErr(res, e); }
+});
 
 /* ── 活動開始前的測試模式 ──
    員工名單裡的人（後台登入用的 LINE 跟預約頁是同一個身分）和後台設定的測試電話，
@@ -3802,7 +3916,7 @@ app.post("/island/join", async (req, res) => {
       }
       const m = await fbGet(`members/${phone}`);
       if (!islIsMember(m)) throw islErr("作品島目前只開放給 OTTO2 會員。如果你是會員卻搬不進來，請私訊小編", "NOT_MEMBER");
-      if (m.lineUserId && m.lineUserId !== who.uid) throw islErr("這支電話已經綁定另一個 LINE 帳號。如果是你本人，請私訊小編幫你處理", "PHONE_TAKEN");
+      if (m.lineUserId && m.lineUserId !== who.uid && !(await fbGet(`gacha/players/${phone}/family/${who.uid}`))) throw islErr("這支電話已經綁定另一個 LINE 帳號。如果是你本人，請私訊小編幫你處理", "PHONE_TAKEN");
     }
     const had = await fbGet(`island/owner/${key}`);
     if (typeof had === "string") return res.json({ ok: true, house: had, existed: true });
