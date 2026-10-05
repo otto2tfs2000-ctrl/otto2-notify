@@ -3925,6 +3925,29 @@ app.post("/island/upload", async (req, res) => {
   } catch (e) { gErr(res, e); }
 });
 
+/* 改作品名稱（2026-10-05 大熊要的）：自己家的、或員工；大樹相簿只有員工。空字串＝拿掉名稱 */
+app.post("/island/retitle", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { staff, key } = await islWho(body);
+    const wid = String(body.id || "");
+    if (!/^w[\w]{4,30}$/.test(wid)) throw islErr("找不到這張照片", "BAD_ID");
+    let path;
+    if (body.album) { if (!staff) throw islErr("只有老師可以改大樹相簿", "NOT_STAFF"); path = `island/album/${wid}`; }
+    else {
+      const mine = key ? await fbGet(`island/owner/${key}`) : null;
+      const hid = String(body.house || "");
+      if (!hid || (hid !== mine && !staff)) throw islErr("只能改自己小屋裡的作品", "NOT_YOURS");
+      path = `island/houses/${hid}/works/${wid}`;
+    }
+    if (!(await fbGet(`${path}/ts`))) throw islErr("找不到這張照片", "BAD_ID");
+    const title = String(body.title || "").trim().slice(0, 14);
+    await fbPut(`${path}/title`, title);
+    islDirty();
+    res.json({ ok: true, title });
+  } catch (e) { gErr(res, e); }
+});
+
 /* 刪作品：自己家的、或員工 */
 app.post("/island/delete", async (req, res) => {
   try {
@@ -3964,11 +3987,11 @@ const ISL_ARTISTS = [
   { n: "克林姆", s: "金色裝飾、圖案花紋、華麗閃亮" },
   { n: "米羅", s: "簡單的符號、星星、線條、紅藍黃黑的鮮豔色塊、像童話" },
   { n: "卡蘿", s: "自畫像、人物、花、動物、鮮豔的墨西哥色彩" },
-  { n: "慕夏", s: "新藝術；優雅的線條、花環、圓形光圈、女孩、海報感" },
+  { n: "達文西", s: "文藝復興；寫實的人像、柔和的明暗暈染、素描、觀察大自然和機械" },
   { n: "畢卡索", s: "立體派；幾何形狀、拼貼、從不同角度看的臉、大膽變形" },
   { n: "林布蘭", s: "光影明暗、深色背景、人像、溫暖的光" },
   { n: "草間彌生", s: "圓點點、重複的圖案、南瓜、強烈對比色" },
-  { n: "奈良美智", s: "可愛的大頭小孩、動物角色、簡單乾淨的卡通風" },
+  { n: "馬格利特", s: "超現實主義；平常的東西放在奇怪的地方、藍天白雲、蘋果、帽子、像謎題" },
   { n: "葛飾北齋", s: "浮世繪；海浪、山、風景、藍色、線條清楚" },
 ];
 const ISL_FALLBACK = [
