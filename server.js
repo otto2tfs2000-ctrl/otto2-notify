@@ -3843,6 +3843,8 @@ async function islWho(body) {
 /* 會員：手上有點數／堂數／票券；或曾經買過方案、儲過值（ledger 有紀錄，扭蛋紅利不算） */
 function islIsMember(m) {
   if (!m) return false;
+  /* 後台會員資料勾了「沒有點數／堂數也能進作品島」的固定學員（2026-10-05） */
+  if (m.islandOk) return true;
   if (gIsMember(m)) return true;
   let l = m.ledger || [];
   if (!Array.isArray(l)) l = Object.values(l);
