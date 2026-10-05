@@ -3819,6 +3819,23 @@ app.post("/island/join", async (req, res) => {
   } catch (e) { gErr(res, e); }
 });
 
+/* 改門牌名字（2026-10-05 大熊要的）：屋主改自己家；老師可以改任何一間（body.house） */
+app.post("/island/rename", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { staff, key } = await islWho(body);
+    const mine = key ? await fbGet(`island/owner/${key}`) : null;
+    const hid = staff && body.house ? String(body.house) : (typeof mine === "string" ? mine : "");
+    if (!/^h[\w]{4,30}$/.test(hid)) throw islErr("你還沒有小屋", "NO_HOUSE");
+    const name = String(body.name || "").trim().slice(0, 8);
+    if (!name) throw islErr("請寫一個門牌名字", "NO_NAME");
+    if (!(await fbGet(`island/houses/${hid}/ts`))) throw islErr("找不到這間小屋", "BAD_ID");
+    await fbPut(`island/houses/${hid}/name`, name);
+    islDirty();
+    res.json({ ok: true, house: hid, name });
+  } catch (e) { gErr(res, e); }
+});
+
 /* 上傳：會員只能放自己家；員工可以放任何一間或大樹相簿。一個人一天最多 30 張 */
 const islDaily = new Map();
 app.post("/island/upload", async (req, res) => {
