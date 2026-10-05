@@ -4083,6 +4083,62 @@ app.post("/island/rx", async (req, res) => {
   } catch (e) { gErr(res, e); }
 });
 
+/* ══════════════════════════════════════════════════════════
+   吉祥物島：動物日記（2026-10-05 大熊選的）
+   - 老師（後台員工名單）在教室拍照上傳，選一隻動物、寫一句話；照片跟作品小屋一樣另外存 island/img/{id}，
+     用 /island/img/{id}/{f|t} 給瀏覽器
+   - 大家都看得到（GET /pets/diary 公開），島上那隻動物頭上會冒「新日記」
+   資料：pets/diary/{did} = {a, t, by, ts}
+   ══════════════════════════════════════════════════════════ */
+const PET_IDS = ["gabi", "kabu", "moka", "xiong", "frog"];
+let petDiaryCache = { at: 0, list: null };
+app.get("/pets/diary", async (req, res) => {
+  try {
+    res.set("Cache-Control", "no-store");
+    if (!petDiaryCache.list || Date.now() - petDiaryCache.at > 20000) {
+      const raw = (await fbGet("pets/diary")) || {};
+      const list = Object.entries(raw).filter(([, d]) => d && PET_IDS.includes(d.a))
+        .map(([id, d]) => ({ id, a: d.a, t: d.t || "", ts: d.ts || 0 })).sort((a, b) => b.ts - a.ts).slice(0, 200);
+      petDiaryCache = { at: Date.now(), list };
+    }
+    res.json({ ok: true, list: petDiaryCache.list });
+  } catch (e) { gErr(res, e); }
+});
+app.post("/pets/diary/add", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { who, staff } = await islWho(body);
+    if (!staff) throw islErr("只有老師可以寫動物日記", "NOT_STAFF");
+    const a = String(body.a || ""), t = String(body.t || "").trim().slice(0, 60);
+    if (!PET_IDS.includes(a)) throw islErr("請選一隻動物", "BAD_PET");
+    const full = String(body.full || ""), thumb = String(body.thumb || "");
+    const okImg = (x, max) => x.startsWith("data:image/jpeg;base64,") && x.length < max;
+    if (!okImg(full, 900000) || !okImg(thumb, 160000)) throw islErr("照片格式不對，請重新選一張", "BAD_IMG");
+    const did = "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    await fbPut(`island/img/${did}`, { f: full, t: thumb });
+    await fbPut(`pets/diary/${did}`, { a, t, by: who.displayName || "老師", uid: who.uid, ts: Date.now() });
+    petDiaryCache = { at: 0, list: null };
+    res.json({ ok: true, id: did });
+  } catch (e) { gErr(res, e); }
+});
+app.post("/pets/diary/del", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { staff } = await islWho(body);
+    if (!staff) throw islErr("只有老師可以刪日記", "NOT_STAFF");
+    const did = String(body.id || "");
+    if (!/^d[\w]{6,30}$/.test(did)) throw islErr("找不到這篇日記", "BAD_ID");
+    await fbDel(`pets/diary/${did}`);
+    await fbDel(`island/img/${did}`);
+    petDiaryCache = { at: 0, list: null };
+    res.json({ ok: true });
+  } catch (e) { gErr(res, e); }
+});
+/* 員工判斷給前端顯示「寫日記」按鈕用（真正擋人在上面 add/del） */
+app.post("/pets/me", async (req, res) => {
+  try { const { staff } = await islWho(req.body || {}); res.json({ ok: true, staff }); } catch (e) { gErr(res, e); }
+});
+
 const PORT = process.env.PORT || 3000;
 /* 2026-10-01 一次性：扭蛋改成畢卡索季並提前今天開始（大熊決定）。
    後台 Chrome 操作暫時連不上，改由伺服器開機時寫一次設定；寫過會記 migr 旗標，不會重複。
