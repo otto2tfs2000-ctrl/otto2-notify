@@ -3737,6 +3737,7 @@ function islIsMember(m) {
 function islPublic(raw) {
   const houses = Object.entries(raw.houses || {}).filter(([, h]) => h && h.name).map(([id, h]) => ({
     id, name: h.name, style: h.style, since: h.since, ts: h.ts || 0, staff: !!h.staff,
+    pet: h.pet && h.pet.b ? { b: h.pet.b, c: h.pet.c, n: h.pet.n || "" } : null,
     works: Object.entries(h.works || {}).map(([wid, w]) => ({ id: wid, title: w.title || "", date: w.date || "", by: w.by || "", ts: w.ts || 0,
       cm: w.cm && w.cm.a && w.cm.t ? { a: w.cm.a, t: w.cm.t } : null, rx: islRxCount(w.rx) }))
       .sort((a, b) => a.ts - b.ts),
@@ -3816,6 +3817,33 @@ app.post("/island/join", async (req, res) => {
     if (phone) gLinkMember(who.uid, phone);
     islDirty();
     res.json({ ok: true, house: hid });
+  } catch (e) { gErr(res, e); }
+});
+
+/* 小屋認養天竺鼠（2026-10-05 大熊要的）：蓋到 3 樓（8 件作品）可以認養一隻；品種只能選一次（老師可以改），花色、名字可以改 */
+const GP_BREEDS = ["american", "crested", "abyssinian", "teddy", "peruvian", "texel", "sheltie", "skinny"];
+const GP_COLORS = ["cream", "caramel", "choco", "grey", "bw", "tri", "white", "gold"];
+app.post("/island/pet", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { staff, key } = await islWho(body);
+    const mine = key ? await fbGet(`island/owner/${key}`) : null;
+    const hid = staff && body.house ? String(body.house) : (typeof mine === "string" ? mine : "");
+    if (!/^h[\w]{4,30}$/.test(hid)) throw islErr("你還沒有小屋", "NO_HOUSE");
+    const h = await fbGet(`island/houses/${hid}`);
+    if (!h || !h.ts) throw islErr("找不到這間小屋", "BAD_ID");
+    const n = Object.keys(h.works || {}).length;
+    if (n < 8 && !staff) throw islErr(`小屋蓋到 3 樓（8 件作品）才能認養，現在 ${n} 件`, "NOT_YET");
+    const c = String(body.c || ""), name = String(body.n || "").trim().slice(0, 8);
+    let b = String(body.b || "");
+    if (h.pet && h.pet.b && !staff) b = h.pet.b; /* 品種只能選一次 */
+    if (!GP_BREEDS.includes(b)) throw islErr("請選一個品種", "BAD_BREED");
+    if (!GP_COLORS.includes(c)) throw islErr("請選一個花色", "BAD_COLOR");
+    if (!name) throw islErr("幫牠取個名字吧", "NO_NAME");
+    const pet = { b, c, n: name, since: (h.pet && h.pet.since) || Date.now(), ts: Date.now() };
+    await fbPut(`island/houses/${hid}/pet`, pet);
+    islDirty();
+    res.json({ ok: true, house: hid, pet: { b, c, n: name } });
   } catch (e) { gErr(res, e); }
 });
 
