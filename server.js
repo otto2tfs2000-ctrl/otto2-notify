@@ -3737,7 +3737,7 @@ function islIsMember(m) {
 function islPublic(raw) {
   const houses = Object.entries(raw.houses || {}).filter(([, h]) => h && h.name).map(([id, h]) => ({
     id, name: h.name, style: h.style, since: h.since, ts: h.ts || 0, staff: !!h.staff,
-    pet: h.pet && h.pet.b ? { b: h.pet.b, c: h.pet.c, n: h.pet.n || "" } : null,
+    pet: h.pet && h.pet.b ? { b: h.pet.b, c: h.pet.c, n: h.pet.n || "", love: Number(h.pet.love) || 0 } : null,
     works: Object.entries(h.works || {}).map(([wid, w]) => ({ id: wid, title: w.title || "", date: w.date || "", by: w.by || "", ts: w.ts || 0,
       cm: w.cm && w.cm.a && w.cm.t ? { a: w.cm.a, t: w.cm.t } : null, rx: islRxCount(w.rx) }))
       .sort((a, b) => a.ts - b.ts),
@@ -3840,10 +3840,33 @@ app.post("/island/pet", async (req, res) => {
     if (!GP_BREEDS.includes(b)) throw islErr("請選一個品種", "BAD_BREED");
     if (!GP_COLORS.includes(c)) throw islErr("請選一個花色", "BAD_COLOR");
     if (!name) throw islErr("幫牠取個名字吧", "NO_NAME");
-    const pet = { b, c, n: name, since: (h.pet && h.pet.since) || Date.now(), ts: Date.now() };
+    const pet = { b, c, n: name, since: (h.pet && h.pet.since) || Date.now(), ts: Date.now(), love: Number(h.pet && h.pet.love) || 0, ld: (h.pet && h.pet.ld) || {} };
     await fbPut(`island/houses/${hid}/pet`, pet);
     islDirty();
     res.json({ ok: true, house: hid, pet: { b, c, n: name } });
+  } catch (e) { gErr(res, e); }
+});
+
+/* 認養天竺鼠的親密度（2026-10-05）：屋主每天 摸摸(pet)／餵牠(feed)／帶去吉祥物島一起玩(play) 各 +1，存雲端換手機不歸零 */
+app.post("/island/pet/love", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { key } = await islWho(body);
+    const hid = key ? await fbGet(`island/owner/${key}`) : null;
+    if (typeof hid !== "string") throw islErr("你還沒有小屋", "NO_HOUSE");
+    const why = String(body.why || "");
+    if (!["pet", "feed", "play"].includes(why)) throw islErr("不認得這個動作", "BAD_WHY");
+    const pet = await fbGet(`island/houses/${hid}/pet`);
+    if (!pet || !pet.b) throw islErr("還沒有認養天竺鼠", "NO_PET");
+    const day = gDay(), ld = pet.ld || {};
+    let love = Number(pet.love) || 0, added = false;
+    if (ld[why] !== day) {
+      love += 1; added = true;
+      await fbPut(`island/houses/${hid}/pet/love`, love);
+      await fbPut(`island/houses/${hid}/pet/ld/${why}`, day);
+      islDirty();
+    }
+    res.json({ ok: true, love, added, done: { pet: (why === "pet" && added) || ld.pet === day, feed: (why === "feed" && added) || ld.feed === day, play: (why === "play" && added) || ld.play === day } });
   } catch (e) { gErr(res, e); }
 });
 
