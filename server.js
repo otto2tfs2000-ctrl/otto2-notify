@@ -3820,23 +3820,25 @@ app.post("/island/join", async (req, res) => {
   } catch (e) { gErr(res, e); }
 });
 
-/* 小屋認養天竺鼠（2026-10-05 大熊要的）：蓋到 3 樓（8 件作品）可以認養一隻；品種只能選一次（老師可以改），花色、名字可以改 */
+/* 小屋認養天竺鼠（2026-10-05 大熊要的）：蓋到 3 樓（8 件作品）可以認養一隻；品種只能選一次，花色、名字可以改；只有屋主能動自己家的（老師也不能改別人家的） */
 const GP_BREEDS = ["american", "crested", "abyssinian", "teddy", "peruvian", "texel", "sheltie", "skinny"];
 const GP_COLORS = ["cream", "caramel", "choco", "grey", "bw", "tri", "white", "gold"];
 app.post("/island/pet", async (req, res) => {
   try {
     const body = req.body || {};
-    const { staff, key } = await islWho(body);
+    const { key } = await islWho(body);
+    /* 2026-10-05 大熊：不能改別人家的寵物 → 只能改自己小屋的（老師也一樣），不看 body.house */
     const mine = key ? await fbGet(`island/owner/${key}`) : null;
-    const hid = staff && body.house ? String(body.house) : (typeof mine === "string" ? mine : "");
+    const hid = typeof mine === "string" ? mine : "";
     if (!/^h[\w]{4,30}$/.test(hid)) throw islErr("你還沒有小屋", "NO_HOUSE");
+    if (body.house && String(body.house) !== hid) throw islErr("只能照顧自己家的天竺鼠", "NOT_YOURS");
     const h = await fbGet(`island/houses/${hid}`);
     if (!h || !h.ts) throw islErr("找不到這間小屋", "BAD_ID");
     const n = Object.keys(h.works || {}).length;
-    if (n < 8 && !staff) throw islErr(`小屋蓋到 3 樓（8 件作品）才能認養，現在 ${n} 件`, "NOT_YET");
+    if (n < 8) throw islErr(`小屋蓋到 3 樓（8 件作品）才能認養，現在 ${n} 件`, "NOT_YET");
     const c = String(body.c || ""), name = String(body.n || "").trim().slice(0, 8);
     let b = String(body.b || "");
-    if (h.pet && h.pet.b && !staff) b = h.pet.b; /* 品種只能選一次 */
+    if (h.pet && h.pet.b) b = h.pet.b; /* 品種只能選一次 */
     if (!GP_BREEDS.includes(b)) throw islErr("請選一個品種", "BAD_BREED");
     if (!GP_COLORS.includes(c)) throw islErr("請選一個花色", "BAD_COLOR");
     if (!name) throw islErr("幫牠取個名字吧", "NO_NAME");
