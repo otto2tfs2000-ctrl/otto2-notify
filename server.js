@@ -3206,9 +3206,24 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-06-memline";
+const SERVER_VERSION = "2026-10-06-cldusage";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
+/* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
+app.get("/admin/cldusage", async (req, res) => {
+  try {
+    if (!cldOn()) return res.json({ ok: false, error: "沒有設定 Cloudinary" });
+    const r = await fetch(`https://api.cloudinary.com/v1_1/${CLD.name}/usage`, {
+      headers: { Authorization: "Basic " + Buffer.from(CLD.key + ":" + CLD.secret).toString("base64") },
+    });
+    const j = await r.json();
+    const pick = (o) => (o && typeof o === "object" ? { usage: o.usage, limit: o.limit, used_percent: o.used_percent } : o);
+    res.set("Cache-Control", "no-store");
+    res.json({ ok: r.ok, plan: j.plan, last_updated: j.last_updated, credits: pick(j.credits), storage: pick(j.storage),
+      bandwidth: pick(j.bandwidth), transformations: pick(j.transformations), resources: j.resources, error: j.error && j.error.message });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 /* 不用密鑰：只有路徑名稱和數字，沒有任何客人資料 */
 app.get("/admin/fbstats", (req, res) => {
   const rows = Object.entries(fbStats.paths).map(([path, v]) => ({ path, n: v.n, mb: Math.round(v.bytes / 1e4) / 100 }))
