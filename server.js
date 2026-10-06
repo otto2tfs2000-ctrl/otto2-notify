@@ -1683,6 +1683,20 @@ app.post("/liff/hold/use", async (req, res) => {
   }
 });
 
+/* 2026-10-06 會員整包（約 300KB）以前是每位「還沒綁定的新客人」開預約頁就下載一次，
+   現在整理成「LINE 帳號 → 電話」對照表，5 分鐘內共用。後台剛手動綁好的人最多晚 5 分鐘認得。 */
+const memLine = { at: 0, map: null, p: null };
+async function memLineMap() {
+  if (memLine.map && Date.now() - memLine.at < 300000) return memLine.map;
+  if (!memLine.p) {
+    memLine.p = fbGet("members").then((mem) => {
+      const m = new Map();
+      for (const p in (mem || {})) if (mem[p] && mem[p].lineUserId) m.set(mem[p].lineUserId, { phone: p, name: mem[p].name || "" });
+      memLine.map = m; memLine.at = Date.now(); return m;
+    }).finally(() => { memLine.p = null; });
+  }
+  return memLine.p;
+}
 app.post("/liff/me", async (req, res) => {
   try {
     const uid = String((req.body || {}).userId || "").trim();
@@ -1712,15 +1726,12 @@ app.post("/liff/me", async (req, res) => {
        沒有這段會一直被當陌生人、每次都要重新輸入電話。
        順便把反向連結補回去，下次就不用再查一次全部會員。 */
     if (!phone) {
-      const mem = await fbGet("members");
-      for (const p in (mem || {})) {
-        if (mem[p] && mem[p].lineUserId === uid) {
-          phone = p;
-          name = name || mem[p].name || "";
-          fbPut(`lineIndex/${uid}`, phone);
-          fbPatch(`liffProfiles/${uid}`, { phone, name });
-          break;
-        }
+      const hit = (await memLineMap()).get(uid);
+      if (hit) {
+        phone = hit.phone;
+        name = name || hit.name || "";
+        fbPut(`lineIndex/${uid}`, phone);
+        fbPatch(`liffProfiles/${uid}`, { phone, name });
       }
     }
     if (phone) {
@@ -3195,7 +3206,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-06-cloudinary";
+const SERVER_VERSION = "2026-10-06-memline";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* 不用密鑰：只有路徑名稱和數字，沒有任何客人資料 */
