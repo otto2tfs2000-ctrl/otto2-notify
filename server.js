@@ -352,21 +352,54 @@ function dbUrl(base, secret, path, extra = {}) {
 
 const fbUrl    = (path, extra) => dbUrl(FIREBASE_URL, FIREBASE_SECRET, path, extra);
 
-/* 預約／會員資料庫的小工具 */
-const fbGet = async (path, extra) => (await fetch(fbUrl(path, extra))).json();
-const fbPatch = (path, data) =>
-  fetch(fbUrl(path), {
+/* 2026-10-06 下載量統計：免費方案每月只有 10GB 下載，10 月前 5 天就用了 2.55GB。
+   每次讀資料庫都記下是哪個路徑、讀了多少位元組，/admin/fbstats?key=CRON_KEY 看得到，
+   用來找出誰最吃下載量（只記伺服器這端，後台網頁直接讀資料庫的不在這裡）。 */
+const fbStats = { since: new Date().toISOString(), paths: {} };
+function fbStatKey(path) {
+  const seg = String(path).split("/");
+  if (seg[0] === "island" && seg[1] === "img") return "island/img/" + (seg[3] === "f" ? "f" : seg[3] === "t" ? "t" : "*");
+  return seg.slice(0, seg[0] === "island" || seg[0] === "gacha" || seg[0] === "xmas" ? 2 : 1).join("/");
+}
+const fbGet = async (path, extra) => {
+  const txt = await (await fetch(fbUrl(path, extra))).text();
+  const k = fbStatKey(path), s = fbStats.paths[k] || (fbStats.paths[k] = { n: 0, bytes: 0 });
+  s.n++; s.bytes += txt.length;
+  return JSON.parse(txt);
+};
+/* 寫入加 print=silent：不然 Firebase 會把寫進去的整包資料原封不動回傳一次，也算下載量
+  （作品照片一張近 1MB，存一次就多算 1MB）。沒有任何地方用到寫入的回傳內容。 */
+const fbPatch = (path, data) => {
+  if (String(path).startsWith("bookings")) bkCache.at = 0;
+  return fetch(fbUrl(path, { print: "silent" }), {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
+};
 /* 整個節點覆蓋（給單一值用，例如 lineIndex/{uid} 存的是一支電話字串，不是物件） */
-const fbPut = (path, value) =>
-  fetch(fbUrl(path), {
+const fbPut = (path, value) => {
+  if (String(path).startsWith("bookings")) bkCache.at = 0;
+  return fetch(fbUrl(path, { print: "silent" }), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(value),
   });
+};
+/* 整包預約共用快取：客人開預約頁會連打 /liff/me、/liff/slots、/liff/availability，
+   以前每支都各自整包下載一次 bookings（幾百 KB）。現在 20 秒內共用同一份，
+   同時有好幾個請求也只會真的下載一次。伺服器自己改到預約時會清掉快取。
+   排程（提醒、釋放訂單）仍然直接讀最新的，不走這裡。 */
+const bkCache = { at: 0, data: null, p: null };
+async function bookingsCached() {
+  if (bkCache.data && Date.now() - bkCache.at < 20000) return bkCache.data;
+  if (!bkCache.p) {
+    bkCache.p = fbGet("bookings")
+      .then((d) => { bkCache.data = d || {}; bkCache.at = Date.now(); return bkCache.data; })
+      .finally(() => { bkCache.p = null; });
+  }
+  return bkCache.p;
+}
 
 /* ── 共用：推播 ── */
 async function push(to, messages) {
@@ -1655,7 +1688,7 @@ app.post("/liff/me", async (req, res) => {
     const uid = String((req.body || {}).userId || "").trim();
     if (!uid) return res.status(400).json({ ok: false, error: "缺少 userId" });
 
-    const all = await fbGet("bookings");
+    const all = await bookingsCached();
     let visits = 0;
     for (const k in (all || {})) {
       const b = all[k];
@@ -1711,8 +1744,9 @@ app.post("/liff/me", async (req, res) => {
    body: { from: "2026/08/10", to: "2026/09/30" } 都可省略，省略就給全部 */
 app.post("/liff/slots", async (req, res) => {
   try {
-    const { from = "", to = "" } = req.body || {};
-    const all = await fbGet("bookings");
+    const { from = "", to = "", fresh = false } = req.body || {};
+    /* fresh：送出預約前最後確認名額用，一定要讀最新的，不能吃 20 秒快取，不然會超收 */
+    const all = fresh ? (await fbGet("bookings")) || {} : await bookingsCached();
     const out = {};
     for (const k in (all || {})) {
       const b = all[k];
@@ -1764,7 +1798,7 @@ app.post("/liff/availability", async (req, res) => {
       return res.status(400).json({ ok: false, error: "date 格式要 YYYY/MM/DD" });
     }
 
-    const [all, sched] = await Promise.all([fbGet("bookings"), loadSchedule()]);
+    const [all, sched] = await Promise.all([bookingsCached(), loadSchedule()]);
     const used = {};
     for (const k in (all || {})) {
       const b = all[k];
@@ -1908,7 +1942,7 @@ app.post("/liff/mybookings", async (req, res) => {
 
     const today = todayStr();
     const from = todayStr(); // 過去的不用列，客人查也改不了
-    const all = await fbGet("bookings");
+    const all = await fbGet("bookings"); /* 不走快取：客人剛約完就會來查，要看得到剛建的那筆 */
     const list = Object.entries(all || {})
       .map(([id, b]) => ({ id, ...b }))
       .filter((b) => b && b.date && ownsBooking(b, phone, userId) && b.status !== "expired")
@@ -2265,13 +2299,8 @@ async function gWho(accessToken, allowKiosk) {
   return who;
 }
 
-/* 預約整包很大，抽獎只需要「今天」的，快取一分鐘 */
-let gBkCache = { at: 0, data: null };
-async function gBookings() {
-  if (gBkCache.data && Date.now() - gBkCache.at < 60000) return gBkCache.data;
-  gBkCache = { at: Date.now(), data: (await fbGet("bookings")) || {} };
-  return gBkCache.data;
-}
+/* 預約整包很大，抽獎只需要「今天」的，共用 bookingsCached（20 秒） */
+async function gBookings() { return bookingsCached(); }
 
 /* 跟後台 bkBuildIndex 同一個定義：手上還有點數、堂數，
    或沒過期、數量大於 0 的票券（扭蛋送的票券不算） */
@@ -3166,7 +3195,17 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-03-fixed-slot";
+const SERVER_VERSION = "2026-10-06-fb-diet";
+
+/* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零 */
+app.get("/admin/fbstats", (req, res) => {
+  if (req.query.key !== CRON_KEY) return res.status(403).json({ ok: false });
+  const rows = Object.entries(fbStats.paths).map(([path, v]) => ({ path, n: v.n, mb: Math.round(v.bytes / 1e4) / 100 }))
+    .sort((a, b) => b.mb - a.mb);
+  const total = rows.reduce((t, r) => t + r.mb, 0);
+  res.set("Cache-Control", "no-store");
+  res.json({ ok: true, since: fbStats.since, totalMB: Math.round(total * 100) / 100, rows });
+});
 
 app.get("/health", async (_, res) => {
   const out = {
@@ -3875,17 +3914,29 @@ app.get("/island/data", async (req, res) => {
   try { res.set("Cache-Control", "no-store"); res.json({ ok: true, ...(await islData()) }); } catch (e) { gErr(res, e); }
 });
 
-/* 照片：縮圖記在記憶體（最多 400 張），大圖每次跟資料庫拿，瀏覽器快取一年 */
+/* 照片：縮圖記在記憶體（最多 400 張），瀏覽器快取一年。
+   2026-10-06 大圖也記：以前每位訪客看一張大圖，伺服器就跟資料庫下載一次（將近 1MB），
+   現在記最近的大圖，總量超過約 40MB 就丟最舊的。 */
 const islThumbs = new Map();
+const islFulls = new Map(); let islFullBytes = 0;
+/* 照片刪掉後，記憶體裡的也要一起丟，不然網址還看得到 */
+function islImgForget(id) {
+  islThumbs.delete(id);
+  const v = islFulls.get(id); if (v) { islFulls.delete(id); islFullBytes -= v.length; }
+}
 app.get("/island/img/:id/:s", async (req, res) => {
   try {
     const id = String(req.params.id), s = req.params.s === "f" ? "f" : "t";
     if (!/^[\w-]{6,40}$/.test(id)) return res.sendStatus(404);
-    let data = s === "t" ? islThumbs.get(id) : null;
+    let data = (s === "t" ? islThumbs : islFulls).get(id);
     if (!data) {
       data = await fbGet(`island/img/${id}/${s}`);
       if (typeof data !== "string" || !data.startsWith("data:image/jpeg;base64,")) return res.sendStatus(404);
       if (s === "t") { islThumbs.set(id, data); if (islThumbs.size > 400) islThumbs.delete(islThumbs.keys().next().value); }
+      else {
+        islFulls.set(id, data); islFullBytes += data.length;
+        while (islFullBytes > 40e6 && islFulls.size > 1) { const [k, v] = islFulls.entries().next().value; islFulls.delete(k); islFullBytes -= v.length; }
+      }
     }
     res.set("Content-Type", "image/jpeg");
     res.set("Cache-Control", "public, max-age=31536000, immutable");
@@ -4090,6 +4141,7 @@ app.post("/island/delete", async (req, res) => {
     }
     await fbDel(path);
     await fbDel(`island/img/${wid}`);
+    islImgForget(wid);
     islThumbs.delete(wid);
     islDirty();
     res.json({ ok: true });
@@ -4379,6 +4431,7 @@ app.post("/pets/diary/del", async (req, res) => {
     if (!/^d[\w]{6,30}$/.test(did)) throw islErr("找不到這篇日記", "BAD_ID");
     await fbDel(`pets/diary/${did}`);
     await fbDel(`island/img/${did}`);
+    islImgForget(did);
     petDiaryCache = { at: 0, list: null };
     res.json({ ok: true });
   } catch (e) { gErr(res, e); }
