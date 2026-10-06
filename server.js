@@ -4446,7 +4446,7 @@ app.post("/island/comment", async (req, res) => {
    - 只有會員／員工用 AI；每人每天最多 5 次（員工不限）；每月花費上限 NT$300（存 island/aiSpend/月/chat）
    - 任何失敗、超過上限都回 fixed:true，前端改用固定台詞，不讓人卡住
    ══════════════════════════════════════════════════════════ */
-const ISL_CHAT_PER_DAY = 5, ISL_CHAT_MONTH_NTD = 300;
+const ISL_CHAT_PER_DAY = 5, ISL_CHAT_STAFF_PER_DAY = 15, ISL_CHAT_MONTH_NTD = 300, ISL_CHAT_COOL_MS = 3 * 86400000; /* 會員 AI 用完（或聊滿）後 3 天不能再聊；員工不限冷卻、每天 15 次 */
 const ISL_CHAT_MODEL = "claude-haiku-4-5-20251001", ISL_CHAT_PRICE = { in: 1 / 1e6, out: 5 / 1e6, cacheRead: 0.1 / 1e6 };
 const ISL_CHAT_MOODS = ["smile", "laugh", "look", "awkward", "hesitant"];
 const ISL_CHAT_SYSTEM = {
@@ -4471,20 +4471,27 @@ app.post("/island/artist-chat", async (req, res) => {
   try {
     const body = req.body || {};
     const sys = ISL_CHAT_SYSTEM[String(body.artist || "")];
-    const q = String(body.q || "").replace(/\s+/g, " ").trim().slice(0, 60);
-    if (!sys || !q) return fixed("bad");
-    if (!ANTHROPIC_API_KEY) return fixed("nokey");
+    if (!sys) return fixed("bad");
     const { who, staff, phone } = await islWho(body);
-    if (!staff) {
-      const m = phone ? await fbGet(`members/${phone}`) : null;
-      if (!islIsMember(m)) return fixed("notMember");
-    }
-    const used = staff ? 0 : Number(await fbGet(`${islDayPath(who.uid)}/chat`)) || 0;
-    if (!staff && used >= ISL_CHAT_PER_DAY) return fixed("daily");
+    const m = !staff && phone ? await fbGet(`members/${phone}`) : null;
+    const member = staff || islIsMember(m);
+    const cdPath = phone && !staff ? `island/chatCd/${phone}` : "";
+    const cool = cdPath ? Math.max(0, (Number(await fbGet(cdPath)) || 0) - Date.now()) : 0;
+    const max = staff ? ISL_CHAT_STAFF_PER_DAY : ISL_CHAT_PER_DAY;
+    const used = Number(await fbGet(`${islDayPath(who.uid)}/chat`)) || 0;
+    const act = String(body.act || "");
+    if (act === "status") return res.json({ ok: true, member, staff, cool, aiMax: max, aiLeft: member ? Math.max(0, max - used) : 0 });
+    if (act === "end") { if (cdPath && member && !cool) await fbPut(cdPath, Date.now() + ISL_CHAT_COOL_MS); return res.json({ ok: true }); }
+    const q = String(body.q || "").replace(/\s+/g, " ").trim().slice(0, 60);
+    if (!q) return fixed("bad");
+    if (!ANTHROPIC_API_KEY) return fixed("nokey");
+    if (!member) return fixed("notMember");
+    if (cool > 0) return fixed("cool");
+    if (used >= max) return fixed("daily");
     if ((await islSpent("chat")) >= ISL_CHAT_MONTH_NTD) return fixed("month");
     const hist = (Array.isArray(body.hist) ? body.hist : []).slice(-3).map((h) => ({ q: String((h && h.q) || "").slice(0, 60), a: String((h && h.a) || "").slice(0, 160) })).filter((h) => h.q && h.a);
     const messages = [];
-    hist.forEach((h) => { messages.push({ role: "user", content: h.q }); messages.push({ role: "assistant", content: "neutral\n" + h.a }); });
+    hist.forEach((h) => { messages.push({ role: "user", content: h.q }); messages.push({ role: "assistant", content: "smile\n" + h.a }); });
     messages.push({ role: "user", content: q });
     const r = await islAskClaude({ model: ISL_CHAT_MODEL, max_tokens: 400, system: sys, messages }, false);
     if (!r.ok) { islAiLastErr = JSON.stringify(r.j).slice(0, 300); console.error("藝術家聊天失敗：", islAiLastErr); return fixed("err"); }
@@ -4495,13 +4502,14 @@ app.post("/island/artist-chat", async (req, res) => {
     let mood = "smile", text = lines.join(" ");
     if (lines.length > 1 && ISL_CHAT_MOODS.includes(lines[0].toLowerCase())) { mood = lines[0].toLowerCase(); text = lines.slice(1).join(" "); }
     else if (ISL_CHAT_MOODS.includes((lines[0] || "").toLowerCase())) return fixed("format");
-    const k = text.indexOf("）");
-    if (!text.startsWith("（") || k < 1) text = "（他看著你，笑了笑）" + text.replace(/^[（(].*?[）)]/, "");
+    if (!text.startsWith("（") || text.indexOf("）") < 1) text = "（他看著你，笑了笑）" + text.replace(/^[（(].*?[）)]/, "");
     const kk = text.indexOf("）");
     const a = text.slice(0, kk + 1), t = text.slice(kk + 1).trim().slice(0, 160);
     if (!t) return fixed("empty");
-    if (!staff) await fbPut(`${islDayPath(who.uid)}/chat`, used + 1);
-    res.json({ ok: true, m: mood, a, t, left: staff ? 99 : ISL_CHAT_PER_DAY - used - 1 });
+    await fbPut(`${islDayPath(who.uid)}/chat`, used + 1);
+    const left = Math.max(0, max - used - 1);
+    if (!staff && left === 0 && cdPath) await fbPut(cdPath, Date.now() + ISL_CHAT_COOL_MS);
+    res.json({ ok: true, m: mood, a, t, left });
   } catch (e) { console.error("artist-chat", e && e.message); res.json({ ok: true, fixed: true, why: "exc" }); }
 });
 /* 員工刪掉不適合的藝術家留言（刪了之後屋主可以再請一次） */
