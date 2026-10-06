@@ -3195,16 +3195,16 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-06-fb-diet";
+const SERVER_VERSION = "2026-10-06-cloudinary";
 
-/* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零 */
+/* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
+/* 不用密鑰：只有路徑名稱和數字，沒有任何客人資料 */
 app.get("/admin/fbstats", (req, res) => {
-  if (req.query.key !== CRON_KEY) return res.status(403).json({ ok: false });
   const rows = Object.entries(fbStats.paths).map(([path, v]) => ({ path, n: v.n, mb: Math.round(v.bytes / 1e4) / 100 }))
     .sort((a, b) => b.mb - a.mb);
   const total = rows.reduce((t, r) => t + r.mb, 0);
   res.set("Cache-Control", "no-store");
-  res.json({ ok: true, since: fbStats.since, totalMB: Math.round(total * 100) / 100, rows });
+  res.json({ ok: true, since: fbStats.since, totalMB: Math.round(total * 100) / 100, rows, cloudinary: cldOn(), imgMigrate: islMigr });
 });
 
 app.get("/health", async (_, res) => {
@@ -3914,6 +3914,106 @@ app.get("/island/data", async (req, res) => {
   try { res.set("Cache-Control", "no-store"); res.json({ ok: true, ...(await islData()) }); } catch (e) { gErr(res, e); }
 });
 
+/* ══ Cloudinary：作品島照片改存這裡（2026-10-06）══════════════
+   以前大圖＋縮圖用 base64 直接存在 island/img/{id}/{f,t}，作品島開放兩天資料庫就從 34MB 漲到 129MB，
+   免費方案上限 1GB、每月下載 10GB，照這樣 10 月底前就會被停用。
+   現在照片傳到 Cloudinary（跟 ai-post-loop 同一個帳號），資料庫只記網址 island/img/{id}/{fu,tu}。
+   /island/img/{id}/{f|t} 照舊可用：新照片轉址到 Cloudinary，還沒搬的舊照片照舊從資料庫給。
+   開機會在背景把舊照片一張張搬過去（islMigrateImgs），進度看 /admin/fbstats。 */
+const CLD = {
+  name: (process.env.CLOUDINARY_CLOUD_NAME || "").trim(),
+  key: (process.env.CLOUDINARY_API_KEY || "").trim(),
+  secret: (process.env.CLOUDINARY_API_SECRET || "").trim(),
+};
+const cldOn = () => !!(CLD.name && CLD.key && CLD.secret);
+function cldSign(params) {
+  const str = Object.keys(params).sort().map((k) => `${k}=${params[k]}`).join("&");
+  return crypto.createHash("sha1").update(str + CLD.secret).digest("hex");
+}
+const cldId = (id, s) => `otto2-island/${id}-${s}`;
+/* 回傳的網址加 f_auto,q_auto：Cloudinary 依瀏覽器自動換成較小的格式，省流量 */
+async function cldUpload(dataUrl, publicId) {
+  const p = { overwrite: "true", public_id: publicId, timestamp: Math.floor(Date.now() / 1000) };
+  const body = new URLSearchParams({ ...p, api_key: CLD.key, signature: cldSign(p), file: dataUrl });
+  const r = await fetch(`https://api.cloudinary.com/v1_1/${CLD.name}/image/upload`, { method: "POST", body });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.secure_url) throw new Error("Cloudinary 上傳失敗：" + ((j.error && j.error.message) || r.status));
+  return j.secure_url.replace("/image/upload/", "/image/upload/f_auto,q_auto/");
+}
+async function cldDestroy(publicId) {
+  try {
+    const p = { invalidate: "true", public_id: publicId, timestamp: Math.floor(Date.now() / 1000) };
+    const body = new URLSearchParams({ ...p, api_key: CLD.key, signature: cldSign(p) });
+    await fetch(`https://api.cloudinary.com/v1_1/${CLD.name}/image/destroy`, { method: "POST", body });
+  } catch (e) { console.error("Cloudinary 刪除失敗：", e.message); }
+}
+/* 存照片：有 Cloudinary 就傳過去、資料庫只記網址；傳不上去才退回舊做法存 base64，不讓家長卡住 */
+async function islSaveImg(id, f, t) {
+  if (cldOn()) {
+    try {
+      const [fu, tu] = await Promise.all([cldUpload(f, cldId(id, "f")), cldUpload(t, cldId(id, "t"))]);
+      await fbPut(`island/img/${id}`, { fu, tu });
+      return;
+    } catch (e) { console.error("作品照片改存資料庫：", e.message); }
+  }
+  await fbPut(`island/img/${id}`, { f, t });
+}
+/* 刪照片：資料庫和 Cloudinary 都刪（不管這張有沒有搬過，刪不存在的不會出錯） */
+async function islDelImg(id) {
+  await fbDel(`island/img/${id}`);
+  islImgForget(id); islUrls.delete(id + "|f"); islUrls.delete(id + "|t");
+  if (cldOn()) await Promise.all([cldDestroy(cldId(id, "f")), cldDestroy(cldId(id, "t"))]);
+}
+/* 照片的 Cloudinary 網址（沒搬過的回 null）；網址不會變，記在記憶體 */
+const islUrls = new Map();
+async function islImgUrl(id, s) {
+  const k = id + "|" + s;
+  if (islUrls.has(k)) return islUrls.get(k);
+  const u = await fbGet(`island/img/${id}/${s}u`);
+  if (typeof u !== "string") return null;
+  islUrls.set(k, u); if (islUrls.size > 5000) islUrls.delete(islUrls.keys().next().value);
+  return u;
+}
+/* 給 AI 評語用的縮圖 base64（Claude 要 data:image/jpeg） */
+async function islThumbData(id) {
+  const tu = await islImgUrl(id, "t");
+  if (tu) {
+    const r = await fetch(tu.replace("/image/upload/f_auto,q_auto/", "/image/upload/"));
+    if (!r.ok) return null;
+    return "data:image/jpeg;base64," + Buffer.from(await r.arrayBuffer()).toString("base64");
+  }
+  return fbGet(`island/img/${id}/t`);
+}
+/* 開機背景搬家：舊的 base64 照片一張張傳到 Cloudinary，成功才把資料庫那筆換成網址 */
+const islMigr = { running: false, total: null, checked: 0, moved: 0, failed: 0, lastErr: "" };
+async function islMigrateImgs() {
+  if (!cldOn() || islMigr.running) return;
+  islMigr.running = true;
+  try {
+    const ids = Object.keys((await fbGet("island/img", { shallow: "true" })) || {});
+    islMigr.total = ids.length;
+    for (const id of ids) {
+      islMigr.checked++;
+      try {
+        const has = await fbGet(`island/img/${id}`, { shallow: "true" });
+        if (!has || typeof has !== "object" || has.fu || !has.f || !has.t) continue;
+        const [f, t] = await Promise.all([fbGet(`island/img/${id}/f`), fbGet(`island/img/${id}/t`)]);
+        if (typeof f !== "string" || typeof t !== "string") continue;
+        const [fu, tu] = await Promise.all([cldUpload(f, cldId(id, "f")), cldUpload(t, cldId(id, "t"))]);
+        /* 搬的這段時間被刪掉了 → Cloudinary 那份也刪，不要寫回去 */
+        if (!(await fbGet(`island/img/${id}`, { shallow: "true" }))) {
+          await Promise.all([cldDestroy(cldId(id, "f")), cldDestroy(cldId(id, "t"))]);
+          continue;
+        }
+        await fbPut(`island/img/${id}`, { fu, tu });
+        islMigr.moved++;
+      } catch (e) { islMigr.failed++; islMigr.lastErr = e.message; console.error("作品照片搬家失敗：", id, e.message); }
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  } catch (e) { islMigr.lastErr = e.message; console.error("作品照片搬家中斷：", e.message); }
+  finally { islMigr.running = false; }
+}
+
 /* 照片：縮圖記在記憶體（最多 400 張），瀏覽器快取一年。
    2026-10-06 大圖也記：以前每位訪客看一張大圖，伺服器就跟資料庫下載一次（將近 1MB），
    現在記最近的大圖，總量超過約 40MB 就丟最舊的。 */
@@ -3930,6 +4030,8 @@ app.get("/island/img/:id/:s", async (req, res) => {
     if (!/^[\w-]{6,40}$/.test(id)) return res.sendStatus(404);
     let data = (s === "t" ? islThumbs : islFulls).get(id);
     if (!data) {
+      const url = await islImgUrl(id, s);
+      if (url) { res.set("Cache-Control", "public, max-age=86400"); return res.redirect(302, url); }
       data = await fbGet(`island/img/${id}/${s}`);
       if (typeof data !== "string" || !data.startsWith("data:image/jpeg;base64,")) return res.sendStatus(404);
       if (s === "t") { islThumbs.set(id, data); if (islThumbs.size > 400) islThumbs.delete(islThumbs.keys().next().value); }
@@ -4091,7 +4193,7 @@ app.post("/island/upload", async (req, res) => {
       path = `island/houses/${hid}/works`;
     }
     const wid = "w" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    await fbPut(`island/img/${wid}`, { f, t });
+    await islSaveImg(wid, f, t);
     const d = gDay();
     await fbPut(`${path}/${wid}`, { title: String(body.title || "").trim().slice(0, 30), date: d.slice(0, 7).replace("-", "/"),
       by: body.target === "album" ? "老師" : (staff && body.target ? "老師" : "本人"), uid: who.uid, ts: Date.now() });
@@ -4140,9 +4242,7 @@ app.post("/island/delete", async (req, res) => {
       path = `island/houses/${hid}/works/${wid}`;
     }
     await fbDel(path);
-    await fbDel(`island/img/${wid}`);
-    islImgForget(wid);
-    islThumbs.delete(wid);
+    await islDelImg(wid);
     islDirty();
     res.json({ ok: true });
   } catch (e) { gErr(res, e); }
@@ -4278,7 +4378,7 @@ app.get("/island/ai-check", async (req, res) => {
       let wid = null, title = "";
       for (const h of Object.values(hs || {})) { const e = Object.entries((h && h.works) || {})[0]; if (e) { wid = e[0]; title = e[1].title || ""; break; } }
       if (!wid) return { ok: false, error: "島上還沒有作品" };
-      const thumb = await fbGet(`island/img/${wid}/t`);
+      const thumb = await islThumbData(wid);
       const cm = await islAiComment(String(thumb || ""), title);
       return { ok: true, ai: cm.ai, a: cm.a, t: cm.t, err: cm.ai ? "" : islAiLastErr, keySet: !!ANTHROPIC_API_KEY };
     })();
@@ -4303,7 +4403,7 @@ app.post("/island/comment", async (req, res) => {
       const usedAi = staff ? 0 : Number(await fbGet(`${islDayPath(who.uid)}/ai`)) || 0;
       const useAi = !body.fixed && (staff || usedAi < ISL_AI_PER_DAY) && (await islSpent()) < ISL_AI_MONTH_NTD;
       if (useAi) {
-        const thumb = await fbGet(`island/img/${wid}/t`);
+        const thumb = await islThumbData(wid);
         cm = typeof thumb === "string" && thumb.startsWith("data:image/jpeg;base64,") ? await islAiComment(thumb, w.title || "") : islFallbackComment(w.title || "");
         if (cm.ai && !staff) await fbPut(`${islDayPath(who.uid)}/ai`, usedAi + 1);
       } else cm = islFallbackComment(w.title || "");
@@ -4416,7 +4516,7 @@ app.post("/pets/diary/add", async (req, res) => {
     const okImg = (x, max) => x.startsWith("data:image/jpeg;base64,") && x.length < max;
     if (!okImg(full, 900000) || !okImg(thumb, 160000)) throw islErr("照片格式不對，請重新選一張", "BAD_IMG");
     const did = "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-    await fbPut(`island/img/${did}`, { f: full, t: thumb });
+    await islSaveImg(did, full, thumb);
     await fbPut(`pets/diary/${did}`, { a, t, by: who.displayName || "老師", uid: who.uid, ts: Date.now() });
     petDiaryCache = { at: 0, list: null };
     res.json({ ok: true, id: did });
@@ -4430,8 +4530,7 @@ app.post("/pets/diary/del", async (req, res) => {
     const did = String(body.id || "");
     if (!/^d[\w]{6,30}$/.test(did)) throw islErr("找不到這篇日記", "BAD_ID");
     await fbDel(`pets/diary/${did}`);
-    await fbDel(`island/img/${did}`);
-    islImgForget(did);
+    await islDelImg(did);
     petDiaryCache = { at: 0, list: null };
     res.json({ ok: true });
   } catch (e) { gErr(res, e); }
@@ -4494,4 +4593,4 @@ async function gResetOwnerToday1001(flag) {
   } catch (e) { console.error("gResetOwnerToday1001", e && e.message) }
 }
 
-app.listen(PORT, () => { console.log(`otto2-notify on ${PORT}`); gMigratePicasso1001().then(() => gResetOwnerToday1001("migrReset1001")).then(() => gResetOwnerToday1001("migrReset1001b")) });
+app.listen(PORT, () => { console.log(`otto2-notify on ${PORT}`); setTimeout(islMigrateImgs, 15000); gMigratePicasso1001().then(() => gResetOwnerToday1001("migrReset1001")).then(() => gResetOwnerToday1001("migrReset1001b")) });
