@@ -3197,6 +3197,209 @@ app.post("/staff/gacha/tickets", async (req, res) => {
   } catch (e) { gErr(res, e); }
 });
 
+/* ══════════════════════════════════════════════════════════
+   藝享選品館（紅利商店）2026-10-07
+   家長用「紅利點數」兌換商品。商品、分類、店員臺詞都由後台（薪資系統「選品館」分頁）自己改。
+
+   資料在 otto2-booking-f9ef7 的 shop/ 底下：
+     shop/config               店名、臺詞、分類清單、兌換券使用天數、是否營業
+     shop/products/{id}        商品：nm, cat, img, desc, price（原價紅利）, sale:{price,from,to}（限時優惠）,
+                               stock（null＝不限量）, perPerson（每人限兌，0＝不限）, active, order
+     shop/mine/{phone}/{id}    這個人這項商品已經兌換幾次
+     shop/redeems/{key}        兌換紀錄（誰、換什麼、扣多少、券編號）
+   兌換＝扣紅利（寫進會員 ledger，操作者「藝享選品館」）＋發一張兌換券（members/{phone}/tickets，src:"gacha"
+   所以不會讓新客被當成會員），到店出示，後台用「已使用」核銷（沿用 /staff/gacha/redeem）。
+   ══════════════════════════════════════════════════════════ */
+const SHOP_CFG_DEFAULT = {
+  name: "藝享選品館", sub: "把累積的美好，換成喜歡的收藏",
+  greeting: "歡迎光臨！", greetingSub: "今天有新的好禮，要不要進來逛逛？",
+  cats: [{ id: "art", nm: "藝術選物" }, { id: "life", nm: "生活好物" }, { id: "exp", nm: "體驗禮遇" }],
+  expiryDays: 90, open: true,
+};
+async function shopCfg() {
+  const c = await fbGet("shop/config");
+  return { ...SHOP_CFG_DEFAULT, ...(c && typeof c === "object" ? c : {}) };
+}
+async function shopProducts() {
+  const o = (await fbGet("shop/products")) || {};
+  return Object.entries(o).filter(([, p]) => p && typeof p === "object").map(([id, p]) => ({ id, ...p }));
+}
+/* 今天的價格：限時優惠期間內用優惠價 */
+function shopPrice(p, today) {
+  const sl = p.sale;
+  if (sl && Number(sl.price) >= 0 && sl.price !== "" && sl.from && sl.to && sl.from <= today && today <= sl.to) return { price: Number(sl.price), orig: Number(p.price) || 0, onSale: true, saleTo: sl.to };
+  return { price: Number(p.price) || 0, orig: Number(p.price) || 0, onSale: false, saleTo: "" };
+}
+/* 跟 xAddBonus 一樣記進會員明細，只是操作者、原因不同；扣點用負數 */
+async function shopLedger(phone, name, delta, reason) {
+  await gEnsureMember(phone, name);
+  const key = `shop_${gDay()}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+  await fbPut(`members/${phone}/ledger/${key}`, {
+    at: new Date().toISOString(), by: "藝享選品館", delta, type: "bonus", reason, src: "gacha",
+  });
+  const l = (await fbGet(`members/${phone}/ledger`)) || {};
+  const sum = { points: 0, sessions: 0, bonus: 0, voucher: 0 };
+  for (const k in l) {
+    const r = l[k]; if (!r) continue;
+    const d = Number(r.delta) || 0;
+    if (r.type in sum) sum[r.type] += d;
+  }
+  await fbPut(`members/${phone}/cache`, sum);
+  return sum.bonus;
+}
+const shopErr = (msg, code) => Object.assign(new Error(msg), { code });
+
+/* 客人端：商品清單＋我的紅利（沒登入／店內平板就不給餘額） */
+app.post("/shop/list", async (req, res) => { /* POST：LINE 登入憑證不放網址 */
+  try {
+    const cfg = await shopCfg(), today = gDay();
+    let me = null, mine = {};
+    const tok = String((req.body || {}).accessToken || "");
+    if (tok && tok !== "kiosk") {
+      try {
+        const who = await gWho(tok);
+        const phone = await gBound(who);
+        if (typeof phone === "string" && gValidPhone(phone)) {
+          const m = await fbGet(`members/${phone}`);
+          me = { phone, name: (m && m.name) || "", bonus: Number(m && m.cache && m.cache.bonus) || 0 };
+          mine = (await fbGet(`shop/mine/${phone}`)) || {};
+        } else me = { phone: "", name: "", bonus: 0, needPhone: true };
+      } catch (e) { /* 登入過期就當沒登入，仍可逛 */ }
+    }
+    const list = (await shopProducts()).filter((p) => p.active !== false && p.nm).sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0))
+      .map((p) => {
+        const pr = shopPrice(p, today), left = p.stock == null || p.stock === "" ? null : Math.max(0, Number(p.stock) || 0);
+        return { id: p.id, nm: p.nm, cat: p.cat || "", img: p.img || "", desc: p.desc || "", price: pr.price, orig: pr.orig, onSale: pr.onSale, saleTo: pr.saleTo,
+          left, soldOut: left === 0, limit: Number(p.perPerson) || 0, mine: Number(mine[p.id]) || 0 };
+      });
+    res.json({ ok: true, today, cfg: { name: cfg.name, sub: cfg.sub, greeting: cfg.greeting, greetingSub: cfg.greetingSub, cats: cfg.cats, open: cfg.open !== false }, me, products: list });
+  } catch (e) { gErr(res, e); }
+});
+
+/* 客人端：兌換 */
+app.post("/shop/redeem", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const who = await gWho(body.accessToken);
+    const phone = await gBound(who);
+    if (!(typeof phone === "string" && gValidPhone(phone))) throw shopErr("請先在遊樂島輸入手機號碼，才能兌換", "NEED_PHONE");
+    const out = await gSerial(async () => {
+      const cfg = await shopCfg();
+      if (cfg.open === false) throw shopErr("選品館暫時休息中", "CLOSED");
+      const id = String(body.id || "");
+      const p = await fbGet(`shop/products/${id}`);
+      if (!p || p.active === false) throw shopErr("這項商品已經下架了", "GONE");
+      const today = gDay(), pr = shopPrice(p, today);
+      const stock = p.stock == null || p.stock === "" ? null : Number(p.stock) || 0;
+      if (stock !== null && stock <= 0) throw shopErr("這項商品兌換完了", "SOLD_OUT");
+      const mineN = Number(await fbGet(`shop/mine/${phone}/${id}`)) || 0, lim = Number(p.perPerson) || 0;
+      if (lim > 0 && mineN >= lim) throw shopErr(`這項商品每人限兌 ${lim} 次，你已經兌換過了`, "LIMIT");
+      const m = await fbGet(`members/${phone}`);
+      const bonus = Number(m && m.cache && m.cache.bonus) || 0;
+      if (bonus < pr.price) throw shopErr(`紅利不夠：需要 ${pr.price} 點，你目前有 ${bonus} 點`, "NOT_ENOUGH");
+      const name = (m && m.name) || who.displayName || "";
+      const gid = `shop_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+      const nb = await shopLedger(phone, name, -pr.price, `兌換：${p.nm}`);
+      let list = (await fbGet(`members/${phone}/tickets`)) || [];
+      if (!Array.isArray(list)) list = Object.values(list);
+      const exp = new Date(Date.now() + 8 * 3600e3 + (Number(cfg.expiryDays) || 90) * 86400e3).toISOString().slice(0, 10);
+      list.push({ name: p.nm, qty: 1, expiry: exp, kind: "shop", raw: `藝享選品館・${p.nm}`, batch: "shop-" + today.slice(0, 7),
+        at: new Date().toISOString(), by: "藝享選品館", src: "gacha", gid });
+      await fbPut(`members/${phone}/tickets`, list);
+      if (stock !== null) await fbPut(`shop/products/${id}/stock`, stock - 1);
+      await fbPut(`shop/mine/${phone}/${id}`, mineN + 1);
+      await fbPut(`shop/redeems/${gid}`, { at: new Date().toISOString(), day: today, phone, name, pid: id, nm: p.nm, price: pr.price, onSale: pr.onSale, gid, expiry: exp });
+      return { bonus: nb, ticket: { name: p.nm, expiry: exp }, left: stock === null ? null : stock - 1, mine: mineN + 1 };
+    });
+    res.json({ ok: true, ...out });
+  } catch (e) { gErr(res, e); }
+});
+
+/* 後台：讀全部（含下架）＋最近的兌換紀錄 */
+app.post("/staff/shop", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const [cfg, saved, prods, red] = await Promise.all([shopCfg(), fbGet("shop/config", { shallow: "true" }), shopProducts(), fbGet("shop/redeems")]);
+    const redeems = Object.values(red || {}).filter(Boolean).sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 300);
+    res.json({ ok: true, cfg, isDefault: !saved, today: gDay(), cloudinary: cldOn(),
+      products: prods.sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0)), redeems });
+  } catch (e) { gErr(res, e); }
+});
+app.post("/staff/shop/cfg", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const c = (req.body || {}).cfg || {};
+    const str = (v, d, n) => String(v == null || v === "" ? d : v).trim().slice(0, n);
+    const seen = new Set();
+    const cats = (Array.isArray(c.cats) ? c.cats : SHOP_CFG_DEFAULT.cats).map((x) => ({ id: str(x.id, "", 12), nm: str(x.nm, "", 10) }))
+      .filter((x) => x.nm).map((x) => { let id = x.id || "c" + Math.random().toString(36).slice(2, 7); while (seen.has(id)) id += "x"; seen.add(id); return { id, nm: x.nm }; });
+    const out = {
+      name: str(c.name, SHOP_CFG_DEFAULT.name, 12), sub: str(c.sub, SHOP_CFG_DEFAULT.sub, 30),
+      greeting: str(c.greeting, SHOP_CFG_DEFAULT.greeting, 16), greetingSub: str(c.greetingSub, SHOP_CFG_DEFAULT.greetingSub, 40),
+      cats, expiryDays: Math.max(1, Math.min(730, Math.round(Number(c.expiryDays)) || 90)), open: c.open !== false,
+      updatedAt: new Date().toISOString(), updatedBy: (s.staff && s.staff.name) || s.uid,
+    };
+    await fbPut("shop/config", out);
+    res.json({ ok: true, cfg: out });
+  } catch (e) { gErr(res, e); }
+});
+app.post("/staff/shop/product", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const p = (req.body || {}).product || {};
+    const str = (v, n) => String(v == null ? "" : v).trim().slice(0, n);
+    const day = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) ? String(v) : "");
+    const id = /^[A-Za-z0-9_]{3,24}$/.test(String(p.id || "")) ? String(p.id) : "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 4);
+    if (!str(p.nm, 30)) throw shopErr("商品要有名稱", "BAD");
+    const price = Math.round(Number(p.price));
+    if (!(price >= 0 && price <= 100000)) throw shopErr("原價紅利要填 0～100000 的整數", "BAD");
+    let sale = null;
+    if (p.sale && p.sale.price !== "" && p.sale.price != null) {
+      const sp = Math.round(Number(p.sale.price)), f = day(p.sale.from), t = day(p.sale.to);
+      if (!(sp >= 0)) throw shopErr("優惠價要填整數", "BAD");
+      if (!f || !t || f > t) throw shopErr("限時優惠要填開始日和結束日（結束日不能比開始日早）", "BAD");
+      sale = { price: sp, from: f, to: t };
+    }
+    const stock = p.stock === "" || p.stock == null ? null : Math.max(0, Math.round(Number(p.stock)) || 0);
+    const old = (await fbGet(`shop/products/${id}`)) || {};
+    const out = {
+      nm: str(p.nm, 30), cat: str(p.cat, 12), img: str(p.img, 400) || old.img || "", desc: str(p.desc, 120), price, sale,
+      stock, perPerson: Math.max(0, Math.round(Number(p.perPerson)) || 0), active: p.active !== false,
+      order: Number.isFinite(Number(p.order)) ? Number(p.order) : Date.now() / 1000,
+      updatedAt: new Date().toISOString(), updatedBy: (s.staff && s.staff.name) || s.uid,
+    };
+    await fbPut(`shop/products/${id}`, out);
+    res.json({ ok: true, product: { id, ...out } });
+  } catch (e) { gErr(res, e); }
+});
+app.post("/staff/shop/delete", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const id = String((req.body || {}).id || "");
+    if (!/^[A-Za-z0-9_]{3,24}$/.test(id)) throw shopErr("商品編號不對", "BAD");
+    await fbDel(`shop/products/${id}`);
+    if (cldOn()) cldDestroy(`otto2-shop/${id}`);
+    res.json({ ok: true });
+  } catch (e) { gErr(res, e); }
+});
+/* 商品照片：後台選檔 → 瀏覽器縮小成 JPEG → 這裡傳到 Cloudinary，商品只記網址 */
+app.post("/staff/shop/img", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const { id, dataUrl } = req.body || {};
+    if (!/^[A-Za-z0-9_]{3,24}$/.test(String(id || ""))) throw shopErr("商品編號不對", "BAD");
+    if (!/^data:image\/(jpeg|png|webp);base64,/.test(String(dataUrl || ""))) throw shopErr("照片格式不對", "BAD");
+    if (!cldOn()) throw shopErr("伺服器還沒設定 Cloudinary，沒辦法傳照片", "NO_CLD");
+    const url = await cldUpload(dataUrl, `otto2-shop/${id}`);
+    res.json({ ok: true, url: url + (url.includes("?") ? "&" : "?") + "v=" + Date.now().toString(36) });
+  } catch (e) { gErr(res, e); }
+});
+
 app.get("/", (_, res) => res.send("Otto2 notify service is running."));
 
 /* 自我檢測：確認 token 是否有效 */
@@ -3206,7 +3409,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-06-cldusage";
+const SERVER_VERSION = "2026-10-07-shop";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
