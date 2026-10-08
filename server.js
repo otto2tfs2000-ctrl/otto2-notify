@@ -3278,14 +3278,18 @@ app.post("/shop/list", async (req, res) => { /* POST：LINE 登入憑證不放�
       } catch (e) { /* 登入過期就當沒登入，仍可逛 */ }
     }
     const op = shopOpening(cfg);
-    const list = (op.pending ? [] : await shopProducts()).filter((p) => p.active !== false && p.nm).sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0))
+    /* 還沒上架任何商品、也沒設開幕時間＝還沒開店，一樣出「還沒開店」的店員（後台上架第一件商品就自動開門） */
+    const hasProd = (await shopProducts()).some((p) => p.active !== false && p.nm);
+    const pending = op.pending || (!hasProd && !cfg.openAt);
+    const list = (pending ? [] : await shopProducts()).filter((p) => p.active !== false && p.nm).sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0))
       .map((p) => {
         const pr = shopPrice(p, today), left = p.stock == null || p.stock === "" ? null : Math.max(0, Number(p.stock) || 0);
         return { id: p.id, nm: p.nm, cat: p.cat || "", img: p.img || "", desc: p.desc || "", price: pr.price, orig: pr.orig, onSale: pr.onSale, saleTo: pr.saleTo,
           left, soldOut: left === 0, limit: Number(p.perPerson) || 0, mine: Number(mine[p.id]) || 0 };
       });
     res.json({ ok: true, today, cfg: { name: cfg.name, sub: cfg.sub, greeting: cfg.greeting, greetingSub: cfg.greetingSub, cats: cfg.cats, open: cfg.open !== false,
-      pending: op.pending, openAt: cfg.openAt || "", openText: op.openText, closedLine: cfg.closedLine, closedSub: String(cfg.closedSub || "").replace(/\{openAt\}/g, op.openText || "不久後") }, me, products: list });
+      pending, openAt: cfg.openAt || "", openText: op.openText, closedLine: cfg.closedLine,
+      closedSub: op.openText ? String(cfg.closedSub || "").replace(/\{openAt\}/g, op.openText) : (String(cfg.closedSub || "").includes("{openAt}") ? "選品館還在準備中，快要開幕囉！到時候再來逛逛！" : String(cfg.closedSub || "")) }, me, products: list });
   } catch (e) { gErr(res, e); }
 });
 
@@ -3425,7 +3429,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-08-shop-openat";
+const SERVER_VERSION = "2026-10-08-shop-empty";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
