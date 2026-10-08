@@ -3215,6 +3215,8 @@ const SHOP_CFG_DEFAULT = {
   greeting: "歡迎光臨！", greetingSub: "今天有新的好禮，要不要進來逛逛？",
   cats: [{ id: "art", nm: "藝術選物" }, { id: "life", nm: "生活好物" }, { id: "exp", nm: "體驗禮遇" }],
   expiryDays: 90, open: true,
+  /* 後台輸入現金售價自動換算兌換點數：每 yuanPerPt 元 = 1 點，點數進位到 ptStep 的倍數（只影響後台填表，不影響客人端） */
+  yuanPerPt: 7, ptStep: 5,
   /* 開幕時間（台灣時間，"2026-10-16T10:00"；空＝不限）：還沒到之前，客人點店面只會看到店員說「還沒開店」 */
   openAt: "", closedLine: "還沒開店喔！", closedSub: "{openAt} 正式開幕，到時候再來逛逛！",
 };
@@ -3357,6 +3359,7 @@ app.post("/staff/shop/cfg", async (req, res) => {
       name: str(c.name, SHOP_CFG_DEFAULT.name, 12), sub: str(c.sub, SHOP_CFG_DEFAULT.sub, 30),
       greeting: str(c.greeting, SHOP_CFG_DEFAULT.greeting, 16), greetingSub: str(c.greetingSub, SHOP_CFG_DEFAULT.greetingSub, 40),
       cats, expiryDays: Math.max(1, Math.min(730, Math.round(Number(c.expiryDays)) || 90)), open: c.open !== false,
+      yuanPerPt: Math.max(1, Math.min(1000, Number(c.yuanPerPt) || 7)), ptStep: [1, 5, 10].includes(Number(c.ptStep)) ? Number(c.ptStep) : 5,
       openAt: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(String(c.openAt || "")) ? String(c.openAt) : "",
       closedLine: str(c.closedLine, SHOP_CFG_DEFAULT.closedLine, 16), closedSub: str(c.closedSub, SHOP_CFG_DEFAULT.closedSub, 60),
       updatedAt: new Date().toISOString(), updatedBy: (s.staff && s.staff.name) || s.uid,
@@ -3382,11 +3385,14 @@ app.post("/staff/shop/product", async (req, res) => {
       if (!(sp >= 0)) throw shopErr("優惠價要填整數", "BAD");
       if (!f || !t || f > t) throw shopErr("限時優惠要填開始日和結束日（結束日不能比開始日早）", "BAD");
       sale = { price: sp, from: f, to: t };
+      const sc = Math.round(Number(p.sale.cash));
+      if (sc > 0 && sc <= 1000000) sale.cash = sc;
     }
+    const cash = Math.round(Number(p.cash));
     const stock = p.stock === "" || p.stock == null ? null : Math.max(0, Math.round(Number(p.stock)) || 0);
     const old = (await fbGet(`shop/products/${id}`)) || {};
     const out = {
-      nm: str(p.nm, 30), cat: str(p.cat, 12), img: str(p.img, 400) || old.img || "", desc: str(p.desc, 120), price, sale,
+      nm: str(p.nm, 30), cat: str(p.cat, 12), img: str(p.img, 400) || old.img || "", desc: str(p.desc, 120), price, sale, cash: cash > 0 && cash <= 1000000 ? cash : null,
       stock, perPerson: Math.max(0, Math.round(Number(p.perPerson)) || 0), active: p.active !== false,
       order: Number.isFinite(Number(p.order)) ? Number(p.order) : Date.now() / 1000,
       updatedAt: new Date().toISOString(), updatedBy: (s.staff && s.staff.name) || s.uid,
@@ -3429,7 +3435,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-08-shop-empty";
+const SERVER_VERSION = "2026-10-08-shop-formula";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
