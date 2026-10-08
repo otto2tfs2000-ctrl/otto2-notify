@@ -3215,7 +3215,18 @@ const SHOP_CFG_DEFAULT = {
   greeting: "歡迎光臨！", greetingSub: "今天有新的好禮，要不要進來逛逛？",
   cats: [{ id: "art", nm: "藝術選物" }, { id: "life", nm: "生活好物" }, { id: "exp", nm: "體驗禮遇" }],
   expiryDays: 90, open: true,
+  /* 開幕時間（台灣時間，"2026-10-16T10:00"；空＝不限）：還沒到之前，客人點店面只會看到店員說「還沒開店」 */
+  openAt: "", closedLine: "還沒開店喔！", closedSub: "{openAt} 正式開幕，到時候再來逛逛！",
 };
+const _nowTW = () => new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 16);
+/* 還沒到開幕時間？回傳 { pending, openText } */
+function shopOpening(cfg) {
+  const at = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(String(cfg.openAt || "")) ? String(cfg.openAt) : "";
+  if (!at) return { pending: false, openText: "" };
+  const m = +at.slice(5, 7), d = +at.slice(8, 10), h = +at.slice(11, 13), mi = at.slice(14, 16);
+  const openText = `${m}月${d}日 ${h < 12 ? "上午" : "下午"}${h % 12 || 12}:${mi}`;
+  return { pending: _nowTW() < at, openText };
+}
 async function shopCfg() {
   const c = await fbGet("shop/config");
   return { ...SHOP_CFG_DEFAULT, ...(c && typeof c === "object" ? c : {}) };
@@ -3266,13 +3277,15 @@ app.post("/shop/list", async (req, res) => { /* POST：LINE 登入憑證不放�
         } else me = { phone: "", name: "", bonus: 0, needPhone: true };
       } catch (e) { /* 登入過期就當沒登入，仍可逛 */ }
     }
-    const list = (await shopProducts()).filter((p) => p.active !== false && p.nm).sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0))
+    const op = shopOpening(cfg);
+    const list = (op.pending ? [] : await shopProducts()).filter((p) => p.active !== false && p.nm).sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0))
       .map((p) => {
         const pr = shopPrice(p, today), left = p.stock == null || p.stock === "" ? null : Math.max(0, Number(p.stock) || 0);
         return { id: p.id, nm: p.nm, cat: p.cat || "", img: p.img || "", desc: p.desc || "", price: pr.price, orig: pr.orig, onSale: pr.onSale, saleTo: pr.saleTo,
           left, soldOut: left === 0, limit: Number(p.perPerson) || 0, mine: Number(mine[p.id]) || 0 };
       });
-    res.json({ ok: true, today, cfg: { name: cfg.name, sub: cfg.sub, greeting: cfg.greeting, greetingSub: cfg.greetingSub, cats: cfg.cats, open: cfg.open !== false }, me, products: list });
+    res.json({ ok: true, today, cfg: { name: cfg.name, sub: cfg.sub, greeting: cfg.greeting, greetingSub: cfg.greetingSub, cats: cfg.cats, open: cfg.open !== false,
+      pending: op.pending, openAt: cfg.openAt || "", openText: op.openText, closedLine: cfg.closedLine, closedSub: String(cfg.closedSub || "").replace(/\{openAt\}/g, op.openText || "不久後") }, me, products: list });
   } catch (e) { gErr(res, e); }
 });
 
@@ -3286,6 +3299,7 @@ app.post("/shop/redeem", async (req, res) => {
     const out = await gSerial(async () => {
       const cfg = await shopCfg();
       if (cfg.open === false) throw shopErr("選品館暫時休息中", "CLOSED");
+      if (shopOpening(cfg).pending) throw shopErr("選品館還沒開幕，開幕後再來兌換", "CLOSED");
       const id = String(body.id || "");
       const p = await fbGet(`shop/products/${id}`);
       if (!p || p.active === false) throw shopErr("這項商品已經下架了", "GONE");
@@ -3339,6 +3353,8 @@ app.post("/staff/shop/cfg", async (req, res) => {
       name: str(c.name, SHOP_CFG_DEFAULT.name, 12), sub: str(c.sub, SHOP_CFG_DEFAULT.sub, 30),
       greeting: str(c.greeting, SHOP_CFG_DEFAULT.greeting, 16), greetingSub: str(c.greetingSub, SHOP_CFG_DEFAULT.greetingSub, 40),
       cats, expiryDays: Math.max(1, Math.min(730, Math.round(Number(c.expiryDays)) || 90)), open: c.open !== false,
+      openAt: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(String(c.openAt || "")) ? String(c.openAt) : "",
+      closedLine: str(c.closedLine, SHOP_CFG_DEFAULT.closedLine, 16), closedSub: str(c.closedSub, SHOP_CFG_DEFAULT.closedSub, 60),
       updatedAt: new Date().toISOString(), updatedBy: (s.staff && s.staff.name) || s.uid,
     };
     await fbPut("shop/config", out);
@@ -3409,7 +3425,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-07-shop";
+const SERVER_VERSION = "2026-10-08-shop-openat";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
