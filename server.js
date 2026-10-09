@@ -3725,6 +3725,23 @@ app.post("/staff/shop/delete", async (req, res) => {
     res.json({ ok: true });
   } catch (e) { gErr(res, e); }
 });
+/* 調整上架順序：後台把「排好的商品編號」整串傳來，這裡一次改好每個商品的 order（10、20、30…）。
+   用一次多路徑更新（只改 order，不動其他欄位）；不存在的編號直接略過，不會憑空多出商品 */
+app.post("/staff/shop/reorder", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const ids = ((req.body || {}).ids || []).map((x) => String(x)).filter((x) => /^[A-Za-z0-9_]{3,24}$/.test(x));
+    if (!ids.length || ids.length > 500) throw shopErr("順序資料不對", "BAD");
+    const have = (await fbGet("shop/products", { shallow: "true" })) || {};
+    const upd = {};
+    let n = 0;
+    for (const id of ids) if (have[id] && upd[`${id}/order`] === undefined) upd[`${id}/order`] = ++n * 10;
+    if (!n) throw shopErr("找不到這些商品", "BAD");
+    await fbPatch("shop/products", upd);
+    res.json({ ok: true, n });
+  } catch (e) { gErr(res, e); }
+});
 /* 商品照片：後台選檔 → 瀏覽器縮小成 JPEG → 這裡傳到 Cloudinary，商品只記網址 */
 app.post("/staff/shop/img", async (req, res) => {
   const s = await requireStaff(req, res);
@@ -3748,7 +3765,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-09-gold-gacha-live4";
+const SERVER_VERSION = "2026-10-09-shop-reorder";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
