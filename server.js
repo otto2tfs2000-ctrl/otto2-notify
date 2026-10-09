@@ -3435,7 +3435,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-08-shop-formula";
+const SERVER_VERSION = "2026-10-09-house-look";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
@@ -4147,7 +4147,7 @@ function islIsMember(m) {
 
 function islPublic(raw) {
   const houses = Object.entries(raw.houses || {}).filter(([, h]) => h && h.name).map(([id, h]) => ({
-    id, name: h.name, style: h.style, since: h.since, ts: h.ts || 0, staff: !!h.staff,
+    id, name: h.name, style: h.style, since: h.since, ts: h.ts || 0, staff: !!h.staff, look: h.look || null,
     pet: h.pet && h.pet.b ? { b: h.pet.b, c: h.pet.c, n: h.pet.n || "", love: Number(h.pet.love) || 0 } : null,
     frog: h.frog && h.frog.b ? { b: h.frog.b, c: h.frog.c, n: h.frog.n || "", love: Number(h.frog.love) || 0 } : null,
     works: Object.entries(h.works || {}).map(([wid, w]) => ({ id: wid, title: w.title || "", date: w.date || "", by: w.by || "", ts: w.ts || 0,
@@ -4402,6 +4402,67 @@ app.post("/island/pet/love", async (req, res) => {
       islDirty();
     }
     res.json({ ok: true, love, added, done: { pet: (why === "pet" && added) || ld.pet === day, feed: (why === "feed" && added) || ld.feed === day, play: (why === "play" && added) || ld.play === day } });
+  } catch (e) { gErr(res, e); }
+});
+
+/* 小屋外觀（2026-10-09 大熊要的）：牆色、屋頂色、各層牆色與裝飾、門口與屋頂裝飾的開關。
+   只有屋主能改自己家；顏色與裝飾要蓋到指定樓層才解鎖（樓層由作品數算：1–15 樓每 4 件 1 層，之後每 6 件 1 層，20 樓封頂，
+   規則要跟 art.html 的 floorsOf 一致）。fc／fd 的 key 是 "f"+樓層，避免 Firebase 把數字 key 轉成陣列。 */
+const ISL_FLOORS = (n) => (n < 56 ? 1 + Math.floor(n / 4) : Math.min(20, 15 + Math.floor((n - 56) / 6)));
+const ISL_FD = { planter: 5, plant: 5, shutter: 8, awning: 10, lights: 12 };
+const ISL_DECO = { bush2: 8, topper: 8, lantern: 10, smoke: 12, path: 15, vane: 15, gold: 20 };
+app.post("/island/look", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { key } = await islWho(body);
+    const hid = key ? await fbGet(`island/owner/${key}`) : null;
+    if (typeof hid !== "string") throw islErr("你還沒有小屋", "NO_HOUSE");
+    const h = await fbGet(`island/houses/${hid}`);
+    if (!h || !h.ts) throw islErr("找不到這間小屋", "BAD_ID");
+    const F = ISL_FLOORS(Object.keys(h.works || {}).length);
+    const bad = (msg) => islErr(msg, "BAD");
+    const look = {};
+    if (body.c != null) {
+      const c = Number(body.c);
+      if (!Number.isInteger(c) || c < 0 || c > 9) throw bad("牆色不對");
+      if (c >= 3 && F < 5) throw bad("這個牆色要蓋到 5 樓才解鎖");
+      look.c = c;
+    }
+    if (body.r != null) {
+      const r = Number(body.r);
+      if (!Number.isInteger(r) || r < 0 || r > 5) throw bad("屋頂色不對");
+      if (r > 0 && F < 5) throw bad("屋頂換色要蓋到 5 樓才解鎖");
+      if (r > 0) look.r = r;
+    }
+    const floorKeys = (o, check) => {
+      const out = {};
+      if (!o || typeof o !== "object") return out;
+      const ks = Object.keys(o);
+      if (ks.length > 20) throw bad("樓層設定太多");
+      for (const k of ks) {
+        const m = /^f(\d{1,2})$/.exec(k);
+        if (!m || Number(m[1]) >= F) continue; /* 超過現在樓層的設定直接丟掉 */
+        out[k] = check(o[k]);
+      }
+      return out;
+    };
+    if (body.fc) {
+      if (F < 5) throw bad("每層各自換色要蓋到 5 樓才解鎖");
+      const fc = floorKeys(body.fc, (v) => { const c = Number(v); if (!Number.isInteger(c) || c < 0 || c > 9) throw bad("牆色不對"); return c; });
+      if (Object.keys(fc).length) look.fc = fc;
+    }
+    if (body.fd) {
+      const fd = floorKeys(body.fd, (v) => { if (!ISL_FD[v]) throw bad("不認得這個裝飾"); if (F < ISL_FD[v]) throw bad("這個裝飾還沒解鎖"); return v; });
+      if (Object.keys(fd).length) look.fd = fd;
+    }
+    if (Array.isArray(body.off)) {
+      const off = [...new Set(body.off.map(String))].filter((k) => ISL_DECO[k]);
+      if (off.length) look.off = off;
+    }
+    if (body.tp === "star") look.tp = "star";
+    await fbPut(`island/houses/${hid}/look`, look);
+    islDirty();
+    res.json({ ok: true, look });
   } catch (e) { gErr(res, e); }
 });
 
