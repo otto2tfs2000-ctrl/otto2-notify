@@ -3387,6 +3387,69 @@ app.post("/staff/gacha/gold/taken", async (req, res) => {
   } catch (e) { gErr(res, e); }
 });
 
+/* 收回已經抽到的獎項（測試、抽錯、客人退回都用這支）：
+   紅利→扣回（明細留一筆「作廢」反向紀錄，不刪原本那筆）；票券／贈品→把會員帳上那張券拿掉；
+   還原限量數量和每人已中次數；刪掉中獎紀錄；金幣可以選「一起收回」或「還給客人（變回沒抽過）」。每次都留一筆稽核紀錄 */
+app.post("/staff/gacha/gold/undo-draw", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const id = String((req.body || {}).id || "");
+    const m = /^(09\d{8})\|([-\w]{3,60})$/.exec(id);
+    if (!m) throw Object.assign(new Error("編號不對"), { code: "BAD" });
+    const deleteCoin = !!(req.body || {}).deleteCoin;
+    const phone = m[1], path = `gacha/goldcoins/${phone}/${m[2]}`;
+    await gSerial(async () => {
+      const c = await fbGet(path);
+      if (!c || !c.used) throw Object.assign(new Error("這枚金幣還沒有抽過，不用收回獎項"), { code: "BAD" });
+      const cfg = await gGoldCfg();
+      const pz = ((cfg && cfg.prizes) || []).find((x) => x.id === c.prizeId) || {};
+      const type = c.prizeType || pz.type || "ticket";
+      const v = Number(c.prizeV) || Number(pz.v) || 0;
+      const nm = c.prizeNm || pz.nm || "";
+      const by = (s.staff && s.staff.name) || s.uid;
+      const usedMs = Date.parse(c.usedAt || "") || 0;
+      const done = [];
+      if (type === "ticket") {
+        let list = (await fbGet(`members/${phone}/tickets`)) || [];
+        if (!Array.isArray(list)) list = Object.values(list);
+        let idx = c.gid ? list.findIndex((x) => x && x.gid === c.gid) : -1;
+        /* 舊的金幣沒記票券編號：用「扭蛋票券、同名稱、時間差兩分鐘內」去找 */
+        if (idx < 0 && !c.gid) idx = list.findIndex((x) => x && x.src === "gacha" && x.name === nm && Math.abs((Date.parse(x.at || "") || 0) - usedMs) < 120000);
+        if (idx >= 0) { list.splice(idx, 1); await fbPut(`members/${phone}/tickets`, list); done.push("票券已從會員帳上拿掉"); }
+        else done.push("找不到會員帳上那張券（可能已經被刪掉）");
+      } else if (type === "bonus" && v > 0) {
+        await gAddBonus(phone, c.name || "", -v, `黃金扭蛋作廢（收回獎項）・${nm}`);
+        done.push(`紅利已扣回 ${v} 點`);
+      }
+      /* 中獎紀錄 */
+      let logKey = c.gid || null;
+      if (!logKey) {
+        const lg = (await fbGet("gacha/log", { orderBy: '"$key"', limitToLast: "400" })) || {};
+        logKey = Object.keys(lg).find((k) => lg[k] && lg[k].why === "gold" && lg[k].phone === phone && lg[k].pid === c.prizeId && Math.abs((Date.parse(lg[k].at || "") || 0) - usedMs) < 120000) || null;
+      }
+      if (logKey) await fbDel(`gacha/log/${logKey}`);
+      /* 限量數量、每人已中次數 */
+      if (pz.qty != null) {
+        const st = Number(await fbGet(`gacha/goldstock/${c.prizeId}`)) || 0;
+        if (st > 0) await fbPut(`gacha/goldstock/${c.prizeId}`, st - 1);
+      }
+      if (type !== "none") {
+        const w = Number(await fbGet(`gacha/goldplayers/${phone}/won/${c.prizeId}`)) || 0;
+        if (w > 0) await fbPut(`gacha/goldplayers/${phone}/won/${c.prizeId}`, w - 1);
+      }
+      /* 金幣 */
+      if (deleteCoin) { await fbDel(path); done.push("金幣一併收回"); }
+      else {
+        await fbPatch(path, { used: false, usedAt: null, prizeId: null, prizeNm: null, prizeIc: null, prizeType: null, prizeV: null, gid: null, taken: null, takenAt: null, takenBy: null });
+        done.push("金幣還給客人（變回沒抽過）");
+      }
+      await fbPost("gacha/goldundo", { at: new Date().toISOString(), by, phone, name: c.name || "", prizeId: c.prizeId || "", prizeNm: nm, type, v, deleteCoin, coinKey: m[2] });
+      res.json({ ok: true, done });
+    });
+  } catch (e) { gErr(res, e); }
+});
+
 /* 賣方案之後，後台呼叫這支：方案金額落在哪一級就發幾枚金幣。
    saleKey 是這次賣方案的編號（後台用賣出時間），同一次重送不會重複發，已經抽掉的也不會被蓋回去。
    沒有符合的等級、金幣期限已過就不發，回 issued:0。「開放」開關只管客人能不能抽，不影響發幣。 */
@@ -3765,7 +3828,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-09-shop-reorder";
+const SERVER_VERSION = "2026-10-09-gold-undo";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
