@@ -3177,6 +3177,12 @@ app.post("/staff/gacha/redeem", async (req, res) => {
     if (undo) { t.qty = 1; delete t.usedAt; delete t.usedBy; }
     else { t.qty = 0; t.usedAt = new Date().toISOString(); t.usedBy = (s.staff && s.staff.name) || s.uid; }
     await fbPut(`members/${phone}/tickets`, list);
+    try {
+      const cs = (await fbGet(`gacha/goldcoins/${phone}`)) || {};
+      for (const k in cs) if (cs[k] && cs[k].gid === gid) {
+        await fbPatch(`gacha/goldcoins/${phone}/${k}`, undo ? { taken: null, takenAt: null, takenBy: null } : { taken: true, takenAt: new Date().toISOString(), takenBy: (s.staff && s.staff.name) || s.uid });
+      }
+    } catch (e) { console.error("黃金扭蛋領取同步失敗", e.message); }
     res.json({ ok: true, ticket: t });
   } catch (e) { gErr(res, e); }
 });
@@ -3246,8 +3252,8 @@ app.post("/staff/gacha/gold", async (req, res) => {
   const s = await requireStaff(req, res);
   if (!s) return;
   try {
-    const [cfg, coins] = await Promise.all([gGoldCfg(), gGoldAllCoins()]);
-    res.json({ ok: true, gold: cfg || { enabled: false, expiry: "", tiers: [], prizes: [] }, isDefault: !cfg, coins, today: gDay() });
+    const [cfg, coins, stock] = await Promise.all([gGoldCfg(), gGoldAllCoins(), fbGet("gacha/goldstock")]);
+    res.json({ ok: true, gold: cfg || { enabled: false, expiry: "", tiers: [], prizes: [] }, isDefault: !cfg, coins, stock: stock || {}, today: gDay() });
   } catch (e) { gErr(res, e); }
 });
 
@@ -3354,6 +3360,33 @@ app.post("/staff/gacha/gold/revoke", async (req, res) => {
   } catch (e) { gErr(res, e); }
 });
 
+/* 領取確認：得獎的人來店拿了獎品，後台按「已領取」。票券／贈品會同步把會員那張券標成已使用（跟「中獎紀錄・核銷」按已使用是同一件事） */
+app.post("/staff/gacha/gold/taken", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const id = String((req.body || {}).id || "");
+    const m = /^(09\d{8})\|([-\w]{3,60})$/.exec(id);
+    if (!m) throw Object.assign(new Error("編號不對"), { code: "BAD" });
+    const undo = !!(req.body || {}).undo;
+    const path = `gacha/goldcoins/${m[1]}/${m[2]}`;
+    const c = await fbGet(path);
+    if (!c || !c.used) throw Object.assign(new Error("這筆還沒有抽獎紀錄"), { code: "BAD" });
+    const by = (s.staff && s.staff.name) || s.uid, at = new Date().toISOString();
+    await fbPatch(path, undo ? { taken: null, takenAt: null, takenBy: null } : { taken: true, takenAt: at, takenBy: by });
+    if (c.gid) {
+      let list = (await fbGet(`members/${m[1]}/tickets`)) || [];
+      if (!Array.isArray(list)) list = Object.values(list);
+      const t = list.find((x) => x && x.gid === c.gid);
+      if (t) {
+        if (undo) { t.qty = 1; delete t.usedAt; delete t.usedBy; } else { t.qty = 0; t.usedAt = at; t.usedBy = by; }
+        await fbPut(`members/${m[1]}/tickets`, list);
+      }
+    }
+    res.json({ ok: true, taken: !undo, takenBy: undo ? "" : by, takenAt: undo ? "" : at });
+  } catch (e) { gErr(res, e); }
+});
+
 /* 賣方案之後，後台呼叫這支：方案金額落在哪一級就發幾枚金幣。
    saleKey 是這次賣方案的編號（後台用賣出時間），同一次重送不會重複發，已經抽掉的也不會被蓋回去。
    沒有符合的等級、金幣期限已過就不發，回 issued:0。「開放」開關只管客人能不能抽，不影響發幣。 */
@@ -3450,7 +3483,7 @@ app.post("/gacha/gold/spin", async (req, res) => {
         const name = (pl && pl.name) || (m && m.name) || who.displayName || "";
         const coinPath = `gacha/goldcoins/${phone}/${coin._k}`;
         /* 先把金幣標成已用（同一個人連點兩下也只會抽一次），後面哪一步失敗就還原 */
-        await fbPatch(coinPath, { used: true, usedAt: new Date().toISOString(), prizeId: hit.id, prizeNm: hit.nm, prizeIc: hit.ic });
+        await fbPatch(coinPath, { used: true, usedAt: new Date().toISOString(), prizeId: hit.id, prizeNm: hit.nm, prizeIc: hit.ic, prizeType: hit.type, prizeV: Number(hit.v) || 0, tierNm: tier.nm });
         let gid = null;
         try {
           const ref = await fbPost("gacha/log", {
@@ -3458,12 +3491,13 @@ app.post("/gacha/gold/spin", async (req, res) => {
             pid: hit.id, nm: hit.nm, ic: hit.ic, type: hit.type, v: hit.v || 0, why: "gold", tier: tier.nm,
           });
           gid = ref && ref.name;
+          if (gid) await fbPatch(coinPath, { gid });
           if (hit.type === "bonus") await gAddBonus(phone, name, Number(hit.v) || 1, `黃金扭蛋・${hit.nm}`);
           else if (hit.type === "ticket") await gAddTicket(phone, name, hit, { expiry: cfg.expiry || "", title: "黃金扭蛋", start: today }, gid);
           if (hit.qty != null) await fbPut(`gacha/goldstock/${hit.id}`, (Number(st[hit.id]) || 0) + 1);
           if (hit.type !== "none") await fbPatch(`gacha/goldplayers/${phone}`, { [`won/${hit.id}`]: (Number(won[hit.id]) || 0) + 1, name });
         } catch (e) {
-          await fbPatch(coinPath, { used: false, usedAt: null, prizeId: null, prizeNm: null, prizeIc: null }).catch(() => {});
+          await fbPatch(coinPath, { used: false, usedAt: null, prizeId: null, prizeNm: null, prizeIc: null, prizeType: null, prizeV: null, gid: null }).catch(() => {});
           if (gid) await fbDel(`gacha/log/${gid}`).catch(() => {});
           throw e;
         }
@@ -3714,7 +3748,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-09-gold-gacha-live3";
+const SERVER_VERSION = "2026-10-09-gold-gacha-live4";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
