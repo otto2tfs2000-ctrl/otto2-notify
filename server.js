@@ -3198,6 +3198,131 @@ app.post("/staff/gacha/tickets", async (req, res) => {
 });
 
 /* ══════════════════════════════════════════════════════════
+   黃金扭蛋（金幣扭蛋）後台 2026-10-09
+   買方案送金幣，一枚金幣抽一次黃金扭蛋。這一段只管「設定」和「金幣紀錄」：
+   - gacha/gold：{ enabled, expiry, tiers:[{ id, nm, plans:[方案金額…], coins }], prizes:[{ …, w:{等級編號:%} }] }
+     方案金額一模一樣才算進那一級（例如 11000、15000 是一級，18000、22000 是二級），送 coins 枚金幣。
+     獎品清單全部等級共用（A、B、C… 照順序），每個獎品各等級各自填機率 w，同一級加起來一定要 100。
+   - gacha/goldcoins/{key}：每枚金幣一筆 { at, phone, name, tier, tierNm, src, by, note, used }
+   客人端抽獎、買方案自動發幣還沒接，目前只有後台手動補發。
+   ══════════════════════════════════════════════════════════ */
+async function gGoldCfg() {
+  const c = await fbGet("gacha/gold");
+  return c && typeof c === "object" ? c : null;
+}
+app.post("/staff/gacha/gold", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const [cfg, coins] = await Promise.all([
+      gGoldCfg(),
+      fbGet("gacha/goldcoins", { orderBy: '"$key"', limitToLast: "800" }),
+    ]);
+    res.json({ ok: true, gold: cfg || { enabled: false, expiry: "", tiers: [], prizes: [] }, isDefault: !cfg, coins: coins || {}, today: gDay() });
+  } catch (e) { gErr(res, e); }
+});
+
+app.post("/staff/gacha/gold/config", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const g = (req.body || {}).gold;
+    if (!g || !Array.isArray(g.tiers) || !Array.isArray(g.prizes)) throw Object.assign(new Error("設定格式不對"), { code: "BAD" });
+    const bad = (m) => Object.assign(new Error(m), { code: "BAD" });
+    /* 等級：每級列出「方案金額」（登記方案時的金額一模一樣才算），同一個金額不能放進兩級 */
+    const tids = new Set();
+    const seenAmt = new Map();
+    const tiers = g.tiers.map((t, ti) => {
+      const nm = String(t.nm || "").trim();
+      if (!nm) throw bad(`第 ${ti + 1} 級沒有名稱`);
+      const id = String(t.id || "").trim() || "t" + Date.now().toString(36) + ti;
+      if (tids.has(id)) throw bad("等級編號重複：" + nm);
+      tids.add(id);
+      const plans = [...new Set((Array.isArray(t.plans) ? t.plans : []).map((x) => Math.round(Number(x) || 0)).filter((x) => x > 0))];
+      for (const a of plans) {
+        if (seenAmt.has(a)) throw bad(`方案金額 ${a} 同時放在「${seenAmt.get(a)}」和「${nm}」，一個金額只能在一級`);
+        seenAmt.set(a, nm);
+      }
+      const coins = Math.max(1, Math.min(50, Math.round(Number(t.coins) || 1)));
+      return { id, nm, plans, coins };
+    });
+    /* 獎品：全部等級共用同一份清單（A、B、C… 照順序），每級各自填機率 w[等級編號]（%）；限量、每人上限是全部等級合計 */
+    const pids = new Set();
+    const prizes = g.prizes.map((p, pi) => {
+      const letter = pi < 26 ? String.fromCharCode(65 + pi) : String(pi + 1);
+      const pn = String(p.nm || "").trim();
+      if (!pn) throw bad(`獎品 ${letter} 沒有名稱`);
+      const pid = String(p.id || "").trim() || "g" + Date.now().toString(36) + pi;
+      if (pids.has(pid)) throw bad(`獎品 ${letter} 編號重複`);
+      pids.add(pid);
+      if (!["bonus", "ticket", "none"].includes(p.type)) throw bad(`獎品 ${letter}「${pn}」類型不對`);
+      const w = {};
+      for (const t of tiers) w[t.id] = Math.max(0, Math.round((Number((p.w || {})[t.id]) || 0) * 100) / 100);
+      const o = { id: pid, ic: String(p.ic || "🎁").slice(0, 8), nm: pn, sub: String(p.sub || "").trim(), type: p.type, w };
+      if (p.type === "bonus") o.v = Math.max(1, Math.round(Number(p.v) || 1));
+      if (p.type === "ticket") o.kind = ["cash", "goods", "bundle", "other"].includes(p.kind) ? p.kind : "goods";
+      if (p.qty !== "" && p.qty != null && Number.isFinite(Number(p.qty))) o.qty = Math.max(0, Math.round(Number(p.qty)));
+      if (p.per !== "" && p.per != null && Number.isFinite(Number(p.per))) o.per = Math.max(1, Math.round(Number(p.per)));
+      return o;
+    });
+    if (prizes.length) {
+      for (const t of tiers) {
+        const sum = Math.round(prizes.reduce((a, p) => a + p.w[t.id], 0) * 100) / 100;
+        if (Math.abs(sum - 100) > 0.01) throw bad(`「${t.nm}」的獎品機率加起來是 ${sum}%，要剛好 100%`);
+      }
+    }
+    if (g.enabled && (!prizes.length || !tiers.length)) throw bad("要開放之前，至少要有一個等級和一個獎品");
+    const out = {
+      enabled: !!g.enabled,
+      expiry: /^\d{4}-\d{2}-\d{2}$/.test(g.expiry || "") ? g.expiry : "",
+      tiers,
+      prizes,
+      updatedAt: new Date().toISOString(),
+      updatedBy: (s.staff && s.staff.name) || s.uid,
+    };
+    await fbPut("gacha/gold", out);
+    res.json({ ok: true, gold: out });
+  } catch (e) { gErr(res, e); }
+});
+
+/* 手動補發金幣（一次最多 20 枚），每枚一筆紀錄 */
+app.post("/staff/gacha/gold/grant", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const b = req.body || {};
+    const phone = normPhone(b.phone);
+    if (!gValidPhone(phone)) throw Object.assign(new Error("電話格式不對"), { code: "BAD" });
+    const n = Math.round(Number(b.n) || 0);
+    if (n < 1 || n > 20) throw Object.assign(new Error("一次補發 1～20 枚"), { code: "BAD" });
+    const cfg = await gGoldCfg();
+    const tier = ((cfg && cfg.tiers) || []).find((t) => t.id === b.tier);
+    if (!tier) throw Object.assign(new Error("請選一個金幣等級"), { code: "BAD" });
+    const mem = await fbGet(`members/${phone}`, { shallow: "false" });
+    if (!mem) throw Object.assign(new Error("找不到這支電話的會員資料"), { code: "BAD" });
+    const base = { at: new Date().toISOString(), phone, name: mem.name || "", tier: tier.id, tierNm: tier.nm, src: "manual",
+      by: (s.staff && s.staff.name) || s.uid, note: String(b.note || "").trim().slice(0, 80), used: false };
+    for (let i = 0; i < n; i++) await fbPost("gacha/goldcoins", base);
+    res.json({ ok: true, granted: n, name: base.name });
+  } catch (e) { gErr(res, e); }
+});
+
+/* 收回還沒用掉的金幣（補發錯人時用） */
+app.post("/staff/gacha/gold/revoke", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const key = String((req.body || {}).key || "");
+    if (!/^[-\w]{10,40}$/.test(key)) throw Object.assign(new Error("編號不對"), { code: "BAD" });
+    const c = await fbGet(`gacha/goldcoins/${key}`);
+    if (!c) throw Object.assign(new Error("找不到這枚金幣"), { code: "BAD" });
+    if (c.used) throw Object.assign(new Error("這枚金幣已經抽過了，不能收回"), { code: "BAD" });
+    await fbDel(`gacha/goldcoins/${key}`);
+    res.json({ ok: true });
+  } catch (e) { gErr(res, e); }
+});
+
+/* ══════════════════════════════════════════════════════════
    藝享選品館（紅利商店）2026-10-07
    家長用「紅利點數」兌換商品。商品、分類、店員臺詞都由後台（薪資系統「選品館」分頁）自己改。
 
@@ -3435,7 +3560,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-09-house-look";
+const SERVER_VERSION = "2026-10-09-gold-gacha-admin";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
