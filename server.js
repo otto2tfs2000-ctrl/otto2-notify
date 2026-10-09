@@ -3412,7 +3412,7 @@ app.post("/gacha/gold/state", async (req, res) => {
     const mine = on ? await gGoldMine(phone) : [];
     const left = expired ? 0 : mine.filter((c) => !c.used).length;
     res.json({
-      ok: true, enabled: show, sim: demo, coins: left, expiry: (cfg && cfg.expiry) || "", expired,
+      ok: true, enabled: show, open: on, sim: demo, coins: left, expiry: (cfg && cfg.expiry) || "", expired,
       tiers: demo && cfg ? (cfg.tiers || []).map((t) => ({ id: t.id, nm: t.nm })) : [],
       prizes: show ? cfg.prizes.map((p) => ({ ic: p.ic, nm: p.nm, sub: p.sub || "", type: p.type })) : [],
       recent: mine.filter((c) => c.used).slice(-5).reverse().map((c) => ({ nm: c.prizeNm, ic: c.prizeIc, at: c.usedAt })),
@@ -3714,7 +3714,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-09-gold-gacha-live2";
+const SERVER_VERSION = "2026-10-09-gold-gacha-live3";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
