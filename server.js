@@ -3382,7 +3382,7 @@ app.post("/staff/gacha/gold/plan-sold", async (req, res) => {
         planNm: String(b.planName || "").slice(0, 60), price, by: (s.staff && s.staff.name) || s.uid, used: false });
       issued++;
     }
-    res.json({ ok: true, issued, tierNm: tier.nm, coins: Number(tier.coins) || 1 });
+    res.json({ ok: true, issued, tierNm: tier.nm, coins: Number(tier.coins) || 1, enabled: !!cfg.enabled });
   } catch (e) { gErr(res, e); }
 });
 
@@ -3714,7 +3714,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-09-gold-gacha-live";
+const SERVER_VERSION = "2026-10-09-gold-gacha-live2";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
