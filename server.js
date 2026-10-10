@@ -2756,7 +2756,7 @@ app.post("/gacha/spin", async (req, res) => {
 
       /* 黑熊圖鑑：每轉一次另外送一隻造型小黑熊，萬聖節當天南瓜熊比較容易出現 */
       const patch = {};
-      let bear = null, collect = null;
+      let bear = null, collect = null, colNo = 0, colLim = 0;
       const bearList = (cfg.games || {}).collect && Array.isArray(cfg.bears) ? cfg.bears : [];
       if (bearList.length) {
         const hw = (cfg.halloweenDays || []).includes(today);
@@ -2782,6 +2782,7 @@ app.post("/gacha/spin", async (req, res) => {
           /* 集滿禮限量：送完之後一樣算集滿，只是不送東西（測試模式不扣名額） */
           const lim = Number(cfg.collectLimit) || 0;
           const used2 = Number(st.collect) || 0;
+          colLim = lim; colNo = used2 + 1;
           if (lim && used2 >= lim) collect.soldOut = true;
           else if (!sim) await fbPut("gacha/stock/collect", used2 + 1);
         }
@@ -2804,6 +2805,14 @@ app.post("/gacha/spin", async (req, res) => {
         await fbPost("gacha/log", {
           at: new Date().toISOString(), date: today, phone, name, uid: who.uid,
           pid: "collect", nm: `圖鑑集滿・${collect.nm}`, ic: "📖", type: collect.type || "ticket", v: Number(collect.v) || 0, why: "collect",
+          test: (sim || today < cfg.start) || undefined, sim: sim || undefined,
+        });
+      }
+      /* 2026-10-10 集滿禮送完後集滿的人以前完全沒有紀錄（後台只看得到「集滿 9 人」看不到是誰）→ 也記一筆，type:none 不算票券、不上跑馬燈 */
+      if (collect && collect.soldOut) {
+        await fbPost("gacha/log", {
+          at: new Date().toISOString(), date: today, phone, name, uid: who.uid,
+          pid: "collect", nm: `圖鑑集滿・限量 ${colLim} 份已送完，沒拿到禮物`, ic: "📖", type: "none", v: 0, why: "collect", soldOut: true,
           test: (sim || today < cfg.start) || undefined, sim: sim || undefined,
         });
       }
@@ -2851,8 +2860,15 @@ app.post("/gacha/spin", async (req, res) => {
         }
       }
       await fbPatch(`${base}/${phone}`, patch);
-      return { prize, milestone, bear, collect, sure, why: reason.why, gid, cfg, phone };
+      return { prize, milestone, bear, collect, sure, why: reason.why, gid, cfg, phone, name, colNo, colLim, test: sim || today < cfg.start };
     });
+    /* 2026-10-10 有人集滿黑熊圖鑑 → 推小秘書 LINE 給大熊（拿到禮物／限量送完沒拿到都通知），測試不推 */
+    if (out.collect && !out.test) {
+      const c = out.collect;
+      pushOwner(`📖 黑熊圖鑑集滿\n${out.name || "（未填姓名）"} ${out.phone}\n` + (c.soldOut
+        ? `集滿禮限量 ${out.colLim} 份已送完，這位沒拿到禮物（要補發請自己決定）`
+        : `已發集滿禮「${c.nm}」${out.colLim ? `（第 ${out.colNo}／${out.colLim} 份）` : ""}，票券在他帳戶，來店出示核銷`)).catch(() => {});
+    }
     const state = await gState(out.cfg, who, out.phone);
     res.json({ ok: true, prize: out.prize, milestone: out.milestone, bear: out.bear, collect: out.collect, sure: out.sure, why: out.why, state });
   } catch (e) { gErr(res, e); }
