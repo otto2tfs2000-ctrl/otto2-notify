@@ -3298,6 +3298,7 @@ app.post("/staff/gacha/gold/config", async (req, res) => {
       if (p.type === "ticket") o.kind = ["cash", "goods", "bundle", "other"].includes(p.kind) ? p.kind : "goods";
       if (p.qty !== "" && p.qty != null && Number.isFinite(Number(p.qty))) o.qty = Math.max(0, Math.round(Number(p.qty)));
       if (p.per !== "" && p.per != null && Number.isFinite(Number(p.per))) o.per = Math.max(1, Math.round(Number(p.per)));
+      if (p.cost !== "" && p.cost != null && Number.isFinite(Number(p.cost))) o.cost = Math.max(0, Math.round(Number(p.cost)));
       return o;
     });
     if (prizes.length) {
@@ -3828,7 +3829,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-09-gold-undo";
+const SERVER_VERSION = "2026-10-10-gold-cost";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
