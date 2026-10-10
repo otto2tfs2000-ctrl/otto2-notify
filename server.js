@@ -3836,6 +3836,119 @@ app.post("/staff/shop/img", async (req, res) => {
   } catch (e) { gErr(res, e); }
 });
 
+/* ══════════════════════════════════════════════════════
+   活動公告（2026-10-10）：餐敘、展覽、看展……在遊樂島上露出
+   大熊在後台（薪資系統 → 扭蛋活動 → 📣 活動公告）上傳海報、設日期；日期可能會改（例如 12/20 改 12/19），
+   所以一律存資料庫、不寫死。報名一律在櫃檯，島上只有「💐 我想去」湊人氣（不是報名）。
+     events/list/{id}        { id, title, sub, date:"YYYY-MM-DD", time, poster, showFrom, bloomDays, on }
+     events/want/{id}/{uid}  { nm:遮名, name, phone, at }   一個 LINE 一朵花
+   預約資料庫（f9ef7）免費額度很緊 → 活動清單和花數在記憶體快取 60 秒
+   ══════════════════════════════════════════════════════ */
+const evErr = (msg, code) => Object.assign(new Error(msg), { code });
+let evCache = null;
+async function evAll(force) {
+  if (!force && evCache && evCache.until > Date.now()) return evCache.v;
+  const [list, want] = await Promise.all([fbGet("events/list"), fbGet("events/want")]);
+  const v = { list: list || {}, want: want || {} };
+  evCache = { v, until: Date.now() + 60000 };
+  return v;
+}
+const evDayOk = (d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ""));
+/* 島上看得到：開著、今天在 showFrom～活動當天之間 */
+function evLive(e, today) {
+  return e && e.on !== false && evDayOk(e.date) && today <= e.date && (!evDayOk(e.showFrom) || today >= e.showFrom);
+}
+function evPublic(e, wants, uid) {
+  const w = Object.entries(wants || {}).map(([k, x]) => ({ k, nm: (x && x.nm) || "一位家長", at: (x && x.at) || "" }))
+    .sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  return { id: e.id, title: e.title || "", sub: e.sub || "", date: e.date, time: e.time || "", poster: e.poster || "",
+    showFrom: e.showFrom || "", bloomDays: Number(e.bloomDays) || 14, wantN: w.length, names: w.slice(0, 40).map((x) => x.nm),
+    mine: !!(uid && wants && wants[uid]) };
+}
+app.post("/event/list", async (req, res) => {
+  try {
+    const today = gDay(), { list, want } = await evAll();
+    let uid = "";
+    const tok = String((req.body || {}).accessToken || "");
+    if (tok && tok !== "kiosk") { try { uid = (await gWho(tok)).uid } catch (e) { /* 過期就當沒登入 */ } }
+    const out = Object.values(list).filter((e) => evLive(e, today)).sort((a, b) => a.date.localeCompare(b.date))
+      .map((e) => evPublic(e, want[e.id], uid));
+    res.json({ ok: true, today, events: out });
+  } catch (e) { gErr(res, e); }
+});
+app.post("/event/want", async (req, res) => {
+  try {
+    const { accessToken, id, on } = req.body || {};
+    const who = await gWho(accessToken);   /* 店內平板（kiosk）不能按 */
+    const today = gDay(), { list } = await evAll();
+    const e = list[String(id || "")];
+    if (!evLive(e, today)) throw evErr("這個活動已經結束了", "GONE");
+    if (on === false) await fbDel(`events/want/${e.id}/${who.uid}`);
+    else {
+      let phone = "", name = "";
+      try {
+        phone = (await gBound(who)) || "";
+        if (typeof phone === "string" && gValidPhone(phone)) name = (await fbGet(`members/${phone}/name`)) || (await fbGet(`gacha/players/${phone}/name`)) || "";
+        else phone = "";
+      } catch (er) { phone = "" }
+      name = String(name || who.displayName || "").trim();
+      await fbPut(`events/want/${e.id}/${who.uid}`, { nm: gMask(name), name, phone, at: new Date().toISOString() });
+    }
+    const { want } = await evAll(true);
+    res.json({ ok: true, event: evPublic(e, want[e.id], who.uid) });
+  } catch (e) { gErr(res, e); }
+});
+/* 後台 */
+app.post("/staff/events", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const { list, want } = await evAll(true);
+    res.json({ ok: true, today: gDay(), cloudinary: cldOn(), list, want });
+  } catch (e) { gErr(res, e); }
+});
+app.post("/staff/events/save", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const x = (req.body || {}).ev || {};
+    const id = String(x.id || "");
+    if (!/^[A-Za-z0-9_]{3,24}$/.test(id)) throw evErr("活動編號不對", "BAD");
+    if (!String(x.title || "").trim()) throw evErr("請填活動名稱", "BAD");
+    if (!evDayOk(x.date)) throw evErr("請填活動日期", "BAD");
+    if (x.showFrom && !evDayOk(x.showFrom)) throw evErr("開始露出的日期格式不對", "BAD");
+    const ev = { id, title: String(x.title).trim().slice(0, 40), sub: String(x.sub || "").trim().slice(0, 60), date: x.date,
+      time: String(x.time || "").trim().slice(0, 20), poster: String(x.poster || "").slice(0, 400), showFrom: x.showFrom || "",
+      bloomDays: Math.max(0, Math.min(60, Number(x.bloomDays) || 0)), on: x.on !== false, by: (s.staff && s.staff.name) || "", at: new Date().toISOString() };
+    await fbPut(`events/list/${id}`, ev);
+    evCache = null;
+    res.json({ ok: true, ev });
+  } catch (e) { gErr(res, e); }
+});
+app.post("/staff/events/delete", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const id = String((req.body || {}).id || "");
+    if (!/^[A-Za-z0-9_]{3,24}$/.test(id)) throw evErr("活動編號不對", "BAD");
+    await fbDel(`events/list/${id}`); await fbDel(`events/want/${id}`);
+    evCache = null;
+    res.json({ ok: true });
+  } catch (e) { gErr(res, e); }
+});
+app.post("/staff/events/img", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const { id, dataUrl } = req.body || {};
+    if (!/^[A-Za-z0-9_]{3,24}$/.test(String(id || ""))) throw evErr("活動編號不對", "BAD");
+    if (!/^data:image\/(jpeg|png|webp);base64,/.test(String(dataUrl || ""))) throw evErr("海報格式不對", "BAD");
+    if (!cldOn()) throw evErr("伺服器還沒設定 Cloudinary，沒辦法傳海報", "NO_CLD");
+    const url = await cldUpload(dataUrl, `otto2-events/${id}`);
+    res.json({ ok: true, url: url + (url.includes("?") ? "&" : "?") + "v=" + Date.now().toString(36) });
+  } catch (e) { gErr(res, e); }
+});
+
 app.get("/", (_, res) => res.send("Otto2 notify service is running."));
 
 /* 自我檢測：確認 token 是否有效 */
@@ -3845,7 +3958,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-10-gold-cost";
+const SERVER_VERSION = "2026-10-10-events";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
