@@ -3848,8 +3848,8 @@ const evErr = (msg, code) => Object.assign(new Error(msg), { code });
 let evCache = null;
 async function evAll(force) {
   if (!force && evCache && evCache.until > Date.now()) return evCache.v;
-  const [list, want] = await Promise.all([fbGet("events/list"), fbGet("events/want")]);
-  const v = { list: list || {}, want: want || {} };
+  const [list, want, bal] = await Promise.all([fbGet("events/list"), fbGet("events/want"), fbGet("balloons/list")]);
+  const v = { list: list || {}, want: want || {}, bal: bal || {} };
   evCache = { v, until: Date.now() + 60000 };
   return v;
 }
@@ -3865,15 +3865,36 @@ function evPublic(e, wants, uid) {
     showFrom: e.showFrom || "", bloomDays: Number(e.bloomDays) || 14, wantN: w.length, names: w.slice(0, 40).map((x) => x.nm),
     mine: !!(uid && wants && wants[uid]) };
 }
+/* 熱氣球（2026-10-12）：A 大氣球固定在畫面角落／B 直式飄帶繞島後面飄／C 單色大字球。
+   後台「🎈 熱氣球」設定，到期日自動收掉，同時最多 3 顆（開始日早的先上）。
+     balloons/list/{id}  { id, style:"A|B|C", title, sub, color, eventId, from, to, on }
+   B 款可以綁一個活動（eventId）：飄帶自動寫「日期＋活動名＋倒數」。跟活動清單一起快取、一起回傳（不多讀資料庫） */
+const BAL_COLORS = ["pink", "blue", "orange", "green", "yellow", "purple"];
+function balLive(bal, list, today) {
+  const out = [];
+  Object.values(bal || {}).forEach((b) => {
+    if (!b || b.on === false || !["A", "B", "C"].includes(b.style)) return;
+    if (evDayOk(b.from) && today < b.from) return;
+    if (evDayOk(b.to) && today > b.to) return;
+    const o = { id: b.id, style: b.style, title: b.title || "", sub: b.sub || "", color: BAL_COLORS.includes(b.color) ? b.color : "pink", from: b.from || "" };
+    if (b.style === "B" && b.eventId) {
+      const e = (list || {})[b.eventId];
+      if (!evLive(e, today)) return;   /* 綁的活動已結束或被關掉：飄帶跟著收 */
+      o.eventId = b.eventId; o.evDate = e.date; o.evTitle = e.title || "";
+    }
+    out.push(o);
+  });
+  return out.sort((a, b) => String(a.from).localeCompare(String(b.from)) || String(a.id).localeCompare(String(b.id))).slice(0, 3);
+}
 app.post("/event/list", async (req, res) => {
   try {
-    const today = gDay(), { list, want } = await evAll();
+    const today = gDay(), { list, want, bal } = await evAll();
     let uid = "";
     const tok = String((req.body || {}).accessToken || "");
     if (tok && tok !== "kiosk") { try { uid = (await gWho(tok)).uid } catch (e) { /* 過期就當沒登入 */ } }
     const out = Object.values(list).filter((e) => evLive(e, today)).sort((a, b) => a.date.localeCompare(b.date))
       .map((e) => evPublic(e, want[e.id], uid));
-    res.json({ ok: true, today, events: out });
+    res.json({ ok: true, today, events: out, balloons: balLive(bal, list, today) });
   } catch (e) { gErr(res, e); }
 });
 app.post("/event/want", async (req, res) => {
@@ -3903,8 +3924,8 @@ app.post("/staff/events", async (req, res) => {
   const s = await requireStaff(req, res);
   if (!s) return;
   try {
-    const { list, want } = await evAll(true);
-    res.json({ ok: true, today: gDay(), cloudinary: cldOn(), list, want });
+    const { list, want, bal } = await evAll(true);
+    res.json({ ok: true, today: gDay(), cloudinary: cldOn(), list, want, bal, live: balLive(bal, list, gDay()).map((b) => b.id) });
   } catch (e) { gErr(res, e); }
 });
 app.post("/staff/events/save", async (req, res) => {
@@ -3936,6 +3957,38 @@ app.post("/staff/events/delete", async (req, res) => {
     res.json({ ok: true });
   } catch (e) { gErr(res, e); }
 });
+app.post("/staff/balloons/save", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const x = (req.body || {}).b || {};
+    const id = String(x.id || "");
+    if (!/^[A-Za-z0-9_]{3,24}$/.test(id)) throw evErr("熱氣球編號不對", "BAD");
+    if (!["A", "B", "C"].includes(x.style)) throw evErr("請選 A／B／C 款", "BAD");
+    const title = String(x.title || "").trim().slice(0, x.style === "A" ? 12 : 10);
+    if (!title && !(x.style === "B" && x.eventId)) throw evErr("請填氣球上的字", "BAD");
+    if (x.from && !evDayOk(x.from)) throw evErr("開始日期格式不對", "BAD");
+    if (x.to && !evDayOk(x.to)) throw evErr("結束日期格式不對", "BAD");
+    if (x.from && x.to && x.to < x.from) throw evErr("結束日期不能比開始日期早", "BAD");
+    const b = { id, style: x.style, title, sub: String(x.sub || "").trim().slice(0, 16), color: BAL_COLORS.includes(x.color) ? x.color : "pink",
+      eventId: x.style === "B" && /^[A-Za-z0-9_]{3,24}$/.test(String(x.eventId || "")) ? String(x.eventId) : "", from: x.from || "", to: x.to || "",
+      on: x.on !== false, by: (s.staff && s.staff.name) || "", at: new Date().toISOString() };
+    await fbPut(`balloons/list/${id}`, b);
+    evCache = null;
+    res.json({ ok: true, b });
+  } catch (e) { gErr(res, e); }
+});
+app.post("/staff/balloons/delete", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const id = String((req.body || {}).id || "");
+    if (!/^[A-Za-z0-9_]{3,24}$/.test(id)) throw evErr("熱氣球編號不對", "BAD");
+    await fbDel(`balloons/list/${id}`);
+    evCache = null;
+    res.json({ ok: true });
+  } catch (e) { gErr(res, e); }
+});
 app.post("/staff/events/img", async (req, res) => {
   const s = await requireStaff(req, res);
   if (!s) return;
@@ -3958,7 +4011,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-10-events";
+const SERVER_VERSION = "2026-10-12-balloons";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
