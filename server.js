@@ -3862,7 +3862,7 @@ function evPublic(e, wants, uid) {
   const w = Object.entries(wants || {}).map(([k, x]) => ({ k, nm: (x && x.nm) || "一位家長", at: (x && x.at) || "" }))
     .sort((a, b) => String(b.at).localeCompare(String(a.at)));
   return { id: e.id, title: e.title || "", sub: e.sub || "", date: e.date, time: e.time || "", poster: e.poster || "",
-    showFrom: e.showFrom || "", bloomDays: Number(e.bloomDays) || 14, wantN: w.length, names: w.slice(0, 40).map((x) => x.nm),
+    showFrom: e.showFrom || "", bloomDays: e.bloomDays == null ? 14 : Number(e.bloomDays) || 0, bloomFrom: evDayOk(e.bloomFrom) ? e.bloomFrom : "", wantN: w.length, names: w.slice(0, 40).map((x) => x.nm),
     mine: !!(uid && wants && wants[uid]) };
 }
 /* 熱氣球（2026-10-12）：A 大氣球固定在畫面角落／B 直式飄帶繞島後面飄／C 單色大字球。
@@ -3938,9 +3938,11 @@ app.post("/staff/events/save", async (req, res) => {
     if (!String(x.title || "").trim()) throw evErr("請填活動名稱", "BAD");
     if (!evDayOk(x.date)) throw evErr("請填活動日期", "BAD");
     if (x.showFrom && !evDayOk(x.showFrom)) throw evErr("開始露出的日期格式不對", "BAD");
+    if (x.bloomFrom && !evDayOk(x.bloomFrom)) throw evErr("開花開始日期格式不對", "BAD");
+    if (x.bloomFrom && x.bloomFrom > x.date) throw evErr("開花開始日不能比活動日晚", "BAD");
     const ev = { id, title: String(x.title).trim().slice(0, 40), sub: String(x.sub || "").trim().slice(0, 60), date: x.date,
       time: String(x.time || "").trim().slice(0, 20), poster: String(x.poster || "").slice(0, 400), showFrom: x.showFrom || "",
-      bloomDays: Math.max(0, Math.min(60, Number(x.bloomDays) || 0)), on: x.on !== false, by: (s.staff && s.staff.name) || "", at: new Date().toISOString() };
+      bloomDays: Math.max(0, Math.min(60, Number(x.bloomDays) || 0)), bloomFrom: x.bloomFrom || "", on: x.on !== false, by: (s.staff && s.staff.name) || "", at: new Date().toISOString() };
     await fbPut(`events/list/${id}`, ev);
     evCache = null;
     res.json({ ok: true, ev });
@@ -4011,7 +4013,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-12-balloons";
+const SERVER_VERSION = "2026-10-12-bloomfrom";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
