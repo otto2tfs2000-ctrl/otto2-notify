@@ -3840,7 +3840,7 @@ app.post("/staff/shop/img", async (req, res) => {
    活動公告（2026-10-10）：餐敘、展覽、看展……在遊樂島上露出
    大熊在後台（薪資系統 → 扭蛋活動 → 📣 活動公告）上傳海報、設日期；日期可能會改（例如 12/20 改 12/19），
    所以一律存資料庫、不寫死。報名一律在櫃檯，島上只有「💐 我想去」湊人氣（不是報名）。
-     events/list/{id}        { id, title, sub, date:"YYYY-MM-DD", time, poster, showFrom, bloomDays, on }
+     events/list/{id}        { id, title, sub, date:"YYYY-MM-DD", time, poster, poster2（第二張海報，選填）, showFrom, bloomDays, on }
      events/want/{id}/{uid}  { nm:遮名, name, phone, at }   一個 LINE 一朵花
    預約資料庫（f9ef7）免費額度很緊 → 活動清單和花數在記憶體快取 60 秒
    ══════════════════════════════════════════════════════ */
@@ -3861,7 +3861,7 @@ function evLive(e, today) {
 function evPublic(e, wants, uid) {
   const w = Object.entries(wants || {}).map(([k, x]) => ({ k, nm: (x && x.nm) || "一位家長", at: (x && x.at) || "" }))
     .sort((a, b) => String(b.at).localeCompare(String(a.at)));
-  return { id: e.id, title: e.title || "", sub: e.sub || "", date: e.date, time: e.time || "", poster: e.poster || "",
+  return { id: e.id, title: e.title || "", sub: e.sub || "", date: e.date, time: e.time || "", poster: e.poster || "", poster2: e.poster2 || "",
     showFrom: e.showFrom || "", bloomDays: e.bloomDays == null ? 14 : Number(e.bloomDays) || 0, bloomFrom: evDayOk(e.bloomFrom) ? e.bloomFrom : "", fee: e.fee || "", place: e.place || "", detail: e.detail || "", wantN: w.length, names: w.slice(0, 40).map((x) => x.nm),
     mine: !!(uid && wants && wants[uid]) };
 }
@@ -3941,7 +3941,7 @@ app.post("/staff/events/save", async (req, res) => {
     if (x.bloomFrom && !evDayOk(x.bloomFrom)) throw evErr("開花開始日期格式不對", "BAD");
     if (x.bloomFrom && x.bloomFrom > x.date) throw evErr("開花開始日不能比活動日晚", "BAD");
     const ev = { id, title: String(x.title).trim().slice(0, 40), sub: String(x.sub || "").trim().slice(0, 60), date: x.date,
-      time: String(x.time || "").trim().slice(0, 20), poster: String(x.poster || "").slice(0, 400), showFrom: x.showFrom || "",
+      time: String(x.time || "").trim().slice(0, 20), poster: String(x.poster || "").slice(0, 400), poster2: String(x.poster2 || "").slice(0, 400), showFrom: x.showFrom || "",
       bloomDays: Math.max(0, Math.min(60, Number(x.bloomDays) || 0)), bloomFrom: x.bloomFrom || "", fee: String(x.fee || "").trim().slice(0, 40), place: String(x.place || "").trim().slice(0, 60), detail: String(x.detail || "").trim().slice(0, 1200), on: x.on !== false, by: (s.staff && s.staff.name) || "", at: new Date().toISOString() };
     await fbPut(`events/list/${id}`, ev);
     evCache = null;
@@ -3995,11 +3995,12 @@ app.post("/staff/events/img", async (req, res) => {
   const s = await requireStaff(req, res);
   if (!s) return;
   try {
-    const { id, dataUrl } = req.body || {};
+    const { id, dataUrl, n } = req.body || {};
     if (!/^[A-Za-z0-9_]{3,24}$/.test(String(id || ""))) throw evErr("活動編號不對", "BAD");
     if (!/^data:image\/(jpeg|png|webp);base64,/.test(String(dataUrl || ""))) throw evErr("海報格式不對", "BAD");
     if (!cldOn()) throw evErr("伺服器還沒設定 Cloudinary，沒辦法傳海報", "NO_CLD");
-    const url = await cldUpload(dataUrl, `otto2-events/${id}`);
+    /* n=2 是第二張海報，另存一個檔名，不會蓋掉第一張 */
+    const url = await cldUpload(dataUrl, `otto2-events/${id}${Number(n) === 2 ? "_2" : ""}`);
     res.json({ ok: true, url: url + (url.includes("?") ? "&" : "?") + "v=" + Date.now().toString(36) });
   } catch (e) { gErr(res, e); }
 });
@@ -4013,7 +4014,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-12-evdetail";
+const SERVER_VERSION = "2026-10-13-evposter2";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
