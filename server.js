@@ -3868,7 +3868,7 @@ function evPublic(e, wants, uid) {
 /* 熱氣球（2026-10-12）：A 大氣球固定在畫面角落／B 直式飄帶繞島後面飄／C 單色大字球。
    後台「🎈 熱氣球」設定，到期日自動收掉，同時最多 3 顆（開始日早的先上）。
      balloons/list/{id}  { id, style:"A|B|C", title, sub, color, eventId, from, to, on }
-   B 款可以綁一個活動（eventId）：飄帶自動寫「日期＋活動名＋倒數」。跟活動清單一起快取、一起回傳（不多讀資料庫） */
+   A／B／C 款都可以綁一個活動（eventId，2026-10-13 起 A／C 也能綁）：氣球自動寫「活動名＋日期＋倒數」。跟活動清單一起快取、一起回傳（不多讀資料庫） */
 const BAL_COLORS = ["pink", "blue", "orange", "green", "yellow", "purple"];
 function balLive(bal, list, today) {
   const out = [];
@@ -3877,7 +3877,7 @@ function balLive(bal, list, today) {
     if (evDayOk(b.from) && today < b.from) return;
     if (evDayOk(b.to) && today > b.to) return;
     const o = { id: b.id, style: b.style, title: b.title || "", sub: b.sub || "", color: BAL_COLORS.includes(b.color) ? b.color : "pink", from: b.from || "" };
-    if (b.style === "B" && b.eventId) {
+    if (b.eventId) {
       const e = (list || {})[b.eventId];
       if (!evLive(e, today)) return;   /* 綁的活動已結束或被關掉：飄帶跟著收 */
       o.eventId = b.eventId; o.evDate = e.date; o.evTitle = e.title || "";
@@ -3968,12 +3968,13 @@ app.post("/staff/balloons/save", async (req, res) => {
     if (!/^[A-Za-z0-9_]{3,24}$/.test(id)) throw evErr("熱氣球編號不對", "BAD");
     if (!["A", "B", "C"].includes(x.style)) throw evErr("請選 A／B／C 款", "BAD");
     const title = String(x.title || "").trim().slice(0, x.style === "A" ? 12 : 10);
-    if (!title && !(x.style === "B" && x.eventId)) throw evErr("請填氣球上的字", "BAD");
+    const evId = /^[A-Za-z0-9_]{3,24}$/.test(String(x.eventId || "")) ? String(x.eventId) : "";
+    if (!title && !evId) throw evErr("請填氣球上的字", "BAD");
     if (x.from && !evDayOk(x.from)) throw evErr("開始日期格式不對", "BAD");
     if (x.to && !evDayOk(x.to)) throw evErr("結束日期格式不對", "BAD");
     if (x.from && x.to && x.to < x.from) throw evErr("結束日期不能比開始日期早", "BAD");
     const b = { id, style: x.style, title, sub: String(x.sub || "").trim().slice(0, 16), color: BAL_COLORS.includes(x.color) ? x.color : "pink",
-      eventId: x.style === "B" && /^[A-Za-z0-9_]{3,24}$/.test(String(x.eventId || "")) ? String(x.eventId) : "", from: x.from || "", to: x.to || "",
+      eventId: evId, from: x.from || "", to: x.to || "",
       on: x.on !== false, by: (s.staff && s.staff.name) || "", at: new Date().toISOString() };
     await fbPut(`balloons/list/${id}`, b);
     evCache = null;
