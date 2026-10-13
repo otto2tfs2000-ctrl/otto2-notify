@@ -3889,20 +3889,26 @@ function evPublic(e, wants, uid) {
 }
 /* 熱氣球（2026-10-12）：A 大氣球固定在畫面角落／B 直式飄帶繞島後面飄／C 單色大字球。
    後台「🎈 熱氣球」設定，到期日自動收掉，同時最多 3 顆（開始日早的先上）。
-     balloons/list/{id}  { id, style:"A|B|C", title, sub, color, eventId, from, to, on }
+     balloons/list/{id}  { id, style:"A|B|C", title, sub, color, eventId, from, to, on, pos("" 或 TL/TM/TR/ML/MM/MR), img(Cloudinary), useEvImg }
    A／B／C 款都可以綁一個活動（eventId，2026-10-13 起 A／C 也能綁）：氣球自動寫「活動名＋日期＋倒數」。跟活動清單一起快取、一起回傳（不多讀資料庫） */
 const BAL_COLORS = ["pink", "blue", "orange", "green", "yellow", "purple"];
+/* 位置（2026-10-13）：空字串＝自動排。T 上排／M 中排 × L 左／M 中／R 右，共 6 格，後台點一格就固定放那裡 */
+const BAL_POS = ["TL", "TM", "TR", "ML", "MM", "MR"];
 function balLive(bal, list, today) {
   const out = [];
   Object.values(bal || {}).forEach((b) => {
     if (!b || b.on === false || !["A", "B", "C"].includes(b.style)) return;
     if (evDayOk(b.from) && today < b.from) return;
     if (evDayOk(b.to) && today > b.to) return;
-    const o = { id: b.id, style: b.style, title: b.title || "", sub: b.sub || "", color: BAL_COLORS.includes(b.color) ? b.color : "pink", from: b.from || "" };
+    const o = { id: b.id, style: b.style, title: b.title || "", sub: b.sub || "", color: BAL_COLORS.includes(b.color) ? b.color : "pink", from: b.from || "",
+      pos: BAL_POS.includes(b.pos) ? b.pos : "" };
+    if (b.img && /^https:\/\/res\.cloudinary\.com\//.test(b.img)) o.img = b.img;   /* 自己另外上傳的圖 */
     if (b.eventId) {
       const e = (list || {})[b.eventId];
       if (!evLive(e, today)) return;   /* 綁的活動已結束或被關掉：飄帶跟著收 */
       o.eventId = b.eventId; o.evDate = e.date; o.evTitle = e.title || "";
+      /* 勾了「用活動海報」：直接用活動公告上傳的第一張海報，不用重傳 */
+      if (b.useEvImg && e.poster && /^https:\/\/res\.cloudinary\.com\//.test(e.poster)) o.img = e.poster;
     }
     out.push(o);
   });
@@ -3991,12 +3997,14 @@ app.post("/staff/balloons/save", async (req, res) => {
     if (!["A", "B", "C"].includes(x.style)) throw evErr("請選 A／B／C 款", "BAD");
     const title = String(x.title || "").trim().slice(0, x.style === "A" ? 12 : 10);
     const evId = /^[A-Za-z0-9_]{3,24}$/.test(String(x.eventId || "")) ? String(x.eventId) : "";
-    if (!title && !evId) throw evErr("請填氣球上的字", "BAD");
+    const img = /^https:\/\/res\.cloudinary\.com\//.test(String(x.img || "")) ? String(x.img) : "";
+    if (!title && !evId && !img) throw evErr("請填氣球上的字、選一個活動，或上傳一張圖", "BAD");
     if (x.from && !evDayOk(x.from)) throw evErr("開始日期格式不對", "BAD");
     if (x.to && !evDayOk(x.to)) throw evErr("結束日期格式不對", "BAD");
     if (x.from && x.to && x.to < x.from) throw evErr("結束日期不能比開始日期早", "BAD");
     const b = { id, style: x.style, title, sub: String(x.sub || "").trim().slice(0, 16), color: BAL_COLORS.includes(x.color) ? x.color : "pink",
       eventId: evId, from: x.from || "", to: x.to || "",
+      pos: BAL_POS.includes(x.pos) ? x.pos : "", img, useEvImg: !!(evId && x.useEvImg),
       on: x.on !== false, by: (s.staff && s.staff.name) || "", at: new Date().toISOString() };
     await fbPut(`balloons/list/${id}`, b);
     evCache = null;
@@ -4012,6 +4020,19 @@ app.post("/staff/balloons/delete", async (req, res) => {
     await fbDel(`balloons/list/${id}`);
     evCache = null;
     res.json({ ok: true });
+  } catch (e) { gErr(res, e); }
+});
+/* 氣球自己的圖（2026-10-13）：跟活動海報同一套 Cloudinary，另放 otto2-balloons/ */
+app.post("/staff/balloons/img", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const { id, dataUrl } = req.body || {};
+    if (!/^[A-Za-z0-9_]{3,24}$/.test(String(id || ""))) throw evErr("熱氣球編號不對", "BAD");
+    if (!/^data:image\/(jpeg|png|webp);base64,/.test(String(dataUrl || ""))) throw evErr("圖片格式不對", "BAD");
+    if (!cldOn()) throw evErr("伺服器還沒設定 Cloudinary，沒辦法傳圖", "NO_CLD");
+    const url = await cldUpload(dataUrl, `otto2-balloons/${id}`);
+    res.json({ ok: true, url: url + (url.includes("?") ? "&" : "?") + "v=" + Date.now().toString(36) });
   } catch (e) { gErr(res, e); }
 });
 app.post("/staff/events/img", async (req, res) => {
@@ -4037,7 +4058,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-13-early-bird";
+const SERVER_VERSION = "2026-10-13-balloon-pos-img";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
