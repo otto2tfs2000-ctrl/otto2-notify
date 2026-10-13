@@ -212,6 +212,16 @@ function eveCapOf(sched, d) { const v = schedVal(sched, d), b = rawEveCapOf(sche
    欄位順序跟客人端 rowsToGroups 一模一樣（不可插欄）：
    分類0／名稱1／說明2／規格3／時長4／價格5／圖片6／上架7／排序8／最小年齡9。
    快取 5 分鐘，客人聊天來回好幾句不用每句都重讀試算表。 */
+/* 早鳥價（2026-10-13）：課程表「早鳥價」「早鳥截止」兩欄都填、今天（台灣時間）沒超過截止日，單價就換成早鳥價。
+   客人端 index.html 的 earlyOn、後台 booking.js 的 bkEarlyOn 是同一條規則，改這裡要一起改。 */
+function earlyDayOf(raw) {
+  const t = String(raw == null ? "" : raw).trim(), ty = new Date(Date.now() + 288e5).toISOString().slice(0, 10);
+  let m;
+  if ((m = t.match(/(\d{4})\s*[\/\-.年]\s*(\d{1,2})\s*[\/\-.月]\s*(\d{1,2})/))) return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+  if ((m = t.match(/Date\((\d{4}),(\d{1,2}),(\d{1,2})\)/))) return `${m[1]}-${String(+m[2] + 1).padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+  if ((m = t.match(/^(\d{1,2})\s*[\/\-.]\s*(\d{1,2})$/))) return `${ty.slice(0, 4)}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`;
+  return "";
+}
 let courseCatalogCache = { data: null, ts: 0 };
 const COURSE_CATALOG_TTL = 5 * 60 * 1000;
 async function loadCourseCatalog() {
@@ -222,6 +232,9 @@ async function loadCourseCatalog() {
   let head = rows.__head || [];
   if (rows.length && String(rows[0][0] || "").trim() === "分類") head = rows[0].map((x) => String(x || "").trim());
   const iPair = head.findIndex((h) => String(h).replace(/\s/g, "") === "兩人價");
+  const iEarly = head.findIndex((h) => String(h).replace(/\s/g, "") === "早鳥價");
+  const iUntil = head.findIndex((h) => String(h).replace(/\s/g, "") === "早鳥截止");
+  const todayTw = new Date(Date.now() + 288e5).toISOString().slice(0, 10);
   const items = rows
     .map((r) => ({
       cat: String(r[0] || "").trim(),
@@ -230,10 +243,16 @@ async function loadCourseCatalog() {
       spec: String(r[3] || "").trim(),
       price: String(r[5] ?? "").trim(),
       pair: iPair >= 0 ? Number(String(r[iPair] ?? "").replace(/[^\d.]/g, "")) || 0 : 0,
+      earlyPrice: iEarly >= 0 ? Number(String(r[iEarly] ?? "").replace(/[^\d.]/g, "")) || 0 : 0,
+      earlyUntil: iUntil >= 0 ? earlyDayOf(r[iUntil]) : "",
       on: String(r[7] || "Y").trim().toUpperCase() !== "N",
       minAge: Number(r[9]) || 0,
     }))
-    .filter((it) => it.name && it.on && it.name !== "課程名稱");
+    .filter((it) => it.name && it.on && it.name !== "課程名稱")
+    .map((it) => {
+      if (!(it.earlyPrice > 0 && it.earlyUntil && todayTw <= it.earlyUntil)) return { ...it, early: null };
+      return { ...it, early: { orig: it.price, until: it.earlyUntil }, price: String(it.earlyPrice), pair: it.pair >= 2 * it.earlyPrice ? 0 : it.pair };
+    });
   courseCatalogCache = { data: items, ts: Date.now() };
   return items;
 }
@@ -292,6 +311,9 @@ const isPriceTierSpec = (s) => PRICE_TIER_WORDS.some((w) => String(s || "").incl
    不然客人端拿這串文字去對 groups 會對不到，整個流程就斷了。 */
 /* 兩人價：大熊在課程表「兩人價」欄自己挑課設定，沒填的課沒有同行優惠。
    同課同尺寸每兩位算一次兩人價，落單的那位照原價（跟客人端 pairTotal 同一條公式）。 */
+const earlyNote = (v) => (v.early
+  ? `（🐦早鳥價：原價 $${v.early.orig}，${+v.early.until.slice(5, 7)}/${+v.early.until.slice(8, 10)} 前預約算 $${v.price}，booking JSON 的 price 填 $${v.price}）`
+  : "");
 const pairNote = (v) => (v.pair > 0
   ? `（兩人同行 $${v.pair}：同一門課同一個規格每兩位一組算 $${v.pair}，落單的那位照原價；booking JSON 的 price 仍填單人原價 $${v.price}）`
   : "");
@@ -300,7 +322,7 @@ function courseCatalogText(items, addons) {
   for (const it of items) {
     const k = it.cat + "|" + it.name;
     if (!byKey.has(k)) byKey.set(k, { cat: it.cat, name: it.name, desc: it.desc, minAge: it.minAge, variants: [] });
-    byKey.get(k).variants.push({ spec: it.spec, price: it.price, pair: it.pair });
+    byKey.get(k).variants.push({ spec: it.spec, price: it.price, pair: it.pair, early: it.early });
   }
   const addonsByCourse = new Map();
   for (const a of addons || []) {
@@ -316,11 +338,11 @@ function courseCatalogText(items, addons) {
           g.variants.find((v) => v.spec.includes("單次原價")) ||
           g.variants.find((v) => v.spec.includes("原價")) ||
           g.variants.reduce((a, b) => (Number(b.price) > Number(a.price) ? b : a));
-        specsText = `非會員價 $${orig.price}${pairNote(orig)}（這是唯一給你的價格，不要主動提會員價或體驗價這些選項——` +
+        specsText = `非會員價 $${orig.price}${earlyNote(orig)}${pairNote(orig)}（這是唯一給你的價格，不要主動提會員價或體驗價這些選項——` +
           `如果之後要輸出 booking JSON，spec 請填「${orig.spec}」；客人是不是會員、能不能用優惠價，` +
           `交給客人送出預約、填手機那一步由系統自動核對套用，你不用猜也不用問）`;
       } else {
-        specsText = g.variants.map((v) => `${v.spec || "單一規格"} $${v.price}${pairNote(v)}`).join("、");
+        specsText = g.variants.map((v) => `${v.spec || "單一規格"} $${v.price}${earlyNote(v)}${pairNote(v)}`).join("、");
       }
       const ads = addonsByCourse.get(g.name);
       return `【${g.cat}】${g.name}${g.minAge ? `（${g.minAge}歲以上）` : ""}：${g.desc}\n  規格與價格：${specsText}` +
@@ -4015,7 +4037,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-13-evposter2";
+const SERVER_VERSION = "2026-10-13-early-bird";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
