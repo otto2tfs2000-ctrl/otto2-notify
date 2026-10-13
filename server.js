@@ -222,9 +222,93 @@ function earlyDayOf(raw) {
   if ((m = t.match(/^(\d{1,2})\s*[\/\-.]\s*(\d{1,2})$/))) return `${ty.slice(0, 4)}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`;
   return "";
 }
+/* ══ 課程管理（2026-10-13）：課程、價格、加購、圖片、順序的「新的唯一來源」════════════
+   後台「📚 課程管理」存在 otto2-2026 的 courseCatalog/（rows、addons、meta）。
+   總開關 meta.live：false（預設）＝所有人照舊讀 Google 試算表，這份資料完全不影響任何人；
+   true＝預約頁、後台、AI 都改讀這份。讀不到、或開關是關的，catalogLive() 回 null，呼叫的地方一律退回試算表。
+   價格欄位：price＝試算表舊價格、pOrig 原價、pMember 會員價（活動課的優惠價）、pFirst 初次體驗價、early／earlyUntil 早鳥、pair 兩人價。
+   「體驗價／會員價／單次原價」分三列的繪畫課：新價格都存在「單次原價」那一列（base），另兩列是舊的價格別列（legacy，只為了對應用料）。 */
+const CAT_TIER_RE = /體驗價|會員價|單次原價|優惠價|原價/;
+let catCache = { data: null, ts: 0 };
+function catalogNormalize(d) {
+  const meta = (d && d.meta) || {};
+  const all = Object.values((d && d.rows) || {}).filter((r) => r && r.name);
+  const ord0 = {};
+  all.forEach((r) => { const c = r.cat || "", o = Number(r.ord) || 0; if (ord0[c] === undefined || o < ord0[c]) ord0[c] = o; });
+  all.sort((a, b) => (ord0[a.cat || ""] - ord0[b.cat || ""]) || String(a.cat || "").localeCompare(String(b.cat || ""), "zh-Hant") ||
+    ((Number(a.sort) || 99) - (Number(b.sort) || 99)) || ((Number(a.ord) || 0) - (Number(b.ord) || 0)));
+  const imgOf = {};
+  all.forEach((r) => { if (r.img && !imgOf[r.name]) imgOf[r.name] = r.img; });
+  const num = (v) => Math.max(0, Math.round(Number(v) || 0));
+  const rows = all.filter((r) => r.on !== false).map((r) => {
+    const spec = String(r.spec || "").trim(), tier = CAT_TIER_RE.test(spec);
+    return { id: r.id, cat: String(r.cat || ""), name: String(r.name), spec, desc: String(r.desc || ""), dur: String(r.dur || ""), img: r.img || imgOf[r.name] || "",
+      sort: Number(r.sort) || 99, minAge: Number(r.minAge) || 0, multi: !!r.multi, seats: num(r.seats), hourly: num(r.hourly),
+      price: num(r.price), pOrig: num(r.pOrig), pMember: num(r.pMember), pFirst: num(r.pFirst), early: num(r.early), earlyUntil: String(r.earlyUntil || ""), pair: num(r.pair),
+      tier: tier ? (/單次原價/.test(spec) ? "base" : "legacy") : "" };
+  });
+  const addons = Object.values((d && d.addons) || {}).filter((a) => a && a.on !== false && a.course && a.name)
+    .map((a) => ({ course: String(a.course), spec: String(a.spec || ""), name: String(a.name), price: num(a.price), unit: a.unit === "hour" ? "hour" : "fixed",
+      maxQty: Math.max(1, Math.min(99, parseInt(a.maxQty, 10) || 1)), sort: Number(a.sort) || 99 }))
+    .sort((a, b) => a.sort - b.sort);
+  return { live: meta.live === true, rows, addons, today: gDay() };
+}
+async function catalogAll(force) {
+  if (!force && catCache.data && Date.now() - catCache.ts < 60000) return catCache.data;
+  const d = await staffGet("courseCatalog");
+  const v = catalogNormalize(d || {});
+  catCache = { data: v, ts: Date.now() };
+  return v;
+}
+/* 開關是開的而且讀得到才回傳資料；否則 null（＝退回試算表） */
+async function catalogLive() {
+  try { const c = await catalogAll(); return c.live && c.rows.length ? c : null; } catch (e) { console.error("讀課程管理失敗，退回試算表：", e.message); return null; }
+}
+/* 同一個價格怎麼算（客人端 index.html、後台 booking.js 是同一條規則，改這裡要一起改）：
+   st＝{member:有方案的會員, first:第一次來上課的新客}；早鳥所有人都適用，蓋過其他價。
+   繪畫課（base 列）spec 要照身分換成「體驗價／會員價／單次原價」，用料才對得上。 */
+function catalogResolve(row, st, today) {
+  st = st || {};
+  const orig = row.pOrig || row.price || 0;
+  let price = orig, tier = "orig";
+  if (row.tier === "base") {
+    if (st.member && row.pMember) { price = row.pMember; tier = "member"; }
+    else if (!st.member && st.first && row.pFirst) { price = row.pFirst; tier = "first"; }
+  } else if (st.member) { if (row.pMember) { price = row.pMember; tier = "member"; } }
+  else if (st.first) { if (row.pFirst) { price = row.pFirst; tier = "first"; } else if (row.pMember) { price = row.pMember; tier = "member"; } }
+  const early = row.early > 0 && /^\d{4}-\d{2}-\d{2}$/.test(row.earlyUntil) && String(today || gDay()) <= row.earlyUntil;
+  if (early) { price = row.early; tier = "early"; }
+  const pair = row.pair >= 2 * price ? 0 : row.pair;
+  const spec = row.tier === "base" ? ({ first: "體驗價", member: "會員價", orig: "單次原價", early: "單次原價" }[tier]) : row.spec;
+  return { price, tier, orig, pair, early, spec };
+}
+app.post("/liff/catalog", async (req, res) => {
+  try {
+    const c = await catalogAll();
+    const body = req.body || {};
+    /* 沒開的時候不給資料（大家照舊讀試算表）；只有後台「切換前檢查」帶 preview 才拿得到 */
+    if (!c.live && !body.preview) return res.json({ ok: true, live: false });
+    res.json({ ok: true, live: c.live, today: c.today, rows: c.rows, addons: c.addons });
+  } catch (e) { res.json({ ok: false, error: String(e.message || e) }); }
+});
+
 let courseCatalogCache = { data: null, ts: 0 };
 const COURSE_CATALOG_TTL = 5 * 60 * 1000;
 async function loadCourseCatalog() {
+  const live = await catalogLive();
+  if (live) {
+    /* 給 AI 看的價格一律是「原價」（AI 不報會員價／體驗價，客人送出預約那一步由系統照身分算）。繪畫課三個價格別列各自給原本的價格，AI 那邊會自己收斂成一個。 */
+    const base = {};
+    live.rows.forEach((r) => { if (r.tier === "base") base[r.name] = r; });
+    return live.rows.map((r) => {
+      let price = r.pOrig || r.price, b = base[r.name];
+      if (r.tier === "legacy" && b) price = /體驗價/.test(r.spec) ? (b.pFirst || r.price) : /會員價/.test(r.spec) ? (b.pMember || r.price) : r.price;
+      if (r.tier === "base") price = r.pOrig || r.price;
+      const it = { cat: r.cat, name: r.name, desc: r.desc, spec: r.spec, price: String(price), pair: r.pair, earlyPrice: r.early, earlyUntil: r.earlyUntil, on: true, minAge: r.minAge };
+      if (!(it.earlyPrice > 0 && it.earlyUntil && live.today <= it.earlyUntil)) return { ...it, early: null };
+      return { ...it, early: { orig: it.price, until: it.earlyUntil }, price: String(it.earlyPrice), pair: it.pair >= 2 * it.earlyPrice ? 0 : it.pair };
+    });
+  }
   if (courseCatalogCache.data && Date.now() - courseCatalogCache.ts < COURSE_CATALOG_TTL) return courseCatalogCache.data;
   const rows = await gvizSheet("課程");
   /* 「兩人價」是後來加在最右邊的欄，照標題找：gviz 有認出標題列就在 __head，
@@ -260,6 +344,8 @@ async function loadCourseCatalog() {
    跟客人端 SHEET_HEADERS「加購」一模一樣。規格是空的就代表這門課不分規格都能加購。 */
 let addonCatalogCache = { data: null, ts: 0 };
 async function loadAddonCatalog() {
+  const live = await catalogLive();
+  if (live) return live.addons.map((a) => ({ courseName: a.course, spec: a.spec, name: a.name, price: String(a.price) + (a.unit === "hour" ? "（每小時）" : "") + (a.maxQty > 1 ? `（每個，最多 ${a.maxQty} 個）` : "") }));
   if (addonCatalogCache.data && Date.now() - addonCatalogCache.ts < COURSE_CATALOG_TTL) return addonCatalogCache.data;
   let items = [];
   try {
@@ -4072,7 +4158,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-13-catalog-img";
+const SERVER_VERSION = "2026-10-13-catalog-live";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
