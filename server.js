@@ -4035,6 +4035,20 @@ app.post("/staff/balloons/img", async (req, res) => {
     res.json({ ok: true, url: url + (url.includes("?") ? "&" : "?") + "v=" + Date.now().toString(36) });
   } catch (e) { gErr(res, e); }
 });
+/* 課程圖片（2026-10-13）：後台「課程管理」上傳，客人預約頁的課程卡片用。後台先縮到適合手機的大小；這裡走 Cloudinary（自動轉最省流量的格式、CDN） */
+app.post("/staff/catalog/img", async (req, res) => {
+  const s = await requireStaff(req, res);
+  if (!s) return;
+  try {
+    const { id, dataUrl } = req.body || {};
+    if (!/^[A-Za-z0-9_]{3,24}$/.test(String(id || ""))) throw evErr("課程編號不對", "BAD");
+    if (!/^data:image\/(jpeg|png|webp);base64,/.test(String(dataUrl || ""))) throw evErr("圖片格式不對", "BAD");
+    if (String(dataUrl).length > 3 * 1024 * 1024) throw evErr("圖片太大了，請換一張小一點的", "BAD");
+    if (!cldOn()) throw evErr("伺服器還沒設定 Cloudinary，沒辦法傳圖", "NO_CLD");
+    const url = await cldUpload(dataUrl, `otto2-courses/${id}`);
+    res.json({ ok: true, url: url + (url.includes("?") ? "&" : "?") + "v=" + Date.now().toString(36) });
+  } catch (e) { gErr(res, e); }
+});
 app.post("/staff/events/img", async (req, res) => {
   const s = await requireStaff(req, res);
   if (!s) return;
@@ -4058,7 +4072,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-13-balloon-pos-img";
+const SERVER_VERSION = "2026-10-13-catalog-img";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
