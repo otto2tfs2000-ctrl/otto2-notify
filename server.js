@@ -251,7 +251,15 @@ function catalogNormalize(d) {
     .map((a) => ({ course: String(a.course), spec: String(a.spec || ""), name: String(a.name), price: num(a.price), unit: a.unit === "hour" ? "hour" : "fixed",
       maxQty: Math.max(1, Math.min(99, parseInt(a.maxQty, 10) || 1)), sort: Number(a.sort) || 99 }))
     .sort((a, b) => a.sort - b.sort);
-  return { live: meta.live === true, rows, addons, today: gDay() };
+  /* 預約頁的訂金方式、說明文字（後台「課程管理 → 預約頁文字與訂金」）。沒填就不給，客人端照舊讀試算表 */
+  const site = (d && d.site) || {};
+  const deposit = Object.values(site.deposit || {}).filter((x) => x && x.on !== false && x.name)
+    .map((x) => ({ name: String(x.name), desc: String(x.desc || ""), amount: num(x.amount), type: String(x.type || "").toLowerCase(), info: String(x.info || ""), sort: Number(x.sort) || 99 }))
+    .sort((a, b) => a.sort - b.sort);
+  const notices = Object.values(site.notices || {}).filter((x) => x && x.on !== false && x.body)
+    .map((x) => ({ type: x.type === "key" ? "key" : "detail", title: String(x.title || ""), body: String(x.body), sort: Number(x.sort) || 99 }))
+    .sort((a, b) => a.sort - b.sort);
+  return { live: meta.live === true, rows, addons, deposit, notices, today: gDay() };
 }
 async function catalogAll(force) {
   if (!force && catCache.data && Date.now() - catCache.ts < 60000) return catCache.data;
@@ -288,7 +296,7 @@ app.post("/liff/catalog", async (req, res) => {
     const body = req.body || {};
     /* 沒開的時候不給資料（大家照舊讀試算表）；只有後台「切換前檢查」帶 preview 才拿得到 */
     if (!c.live && !body.preview) return res.json({ ok: true, live: false });
-    res.json({ ok: true, live: c.live, today: c.today, rows: c.rows, addons: c.addons });
+    res.json({ ok: true, live: c.live, today: c.today, rows: c.rows, addons: c.addons, deposit: c.deposit, notices: c.notices });
   } catch (e) { res.json({ ok: false, error: String(e.message || e) }); }
 });
 
@@ -4158,7 +4166,7 @@ app.get("/", (_, res) => res.send("Otto2 notify service is running."));
    證明不了跑的是哪一版程式。2026-08-09 那次就是這樣誤判的：
    health 全綠，但 Railway 上其實還是舊檔，/staff/list 回 404。
    以後改完 server.js 就把日期往下加一版，部署後打開 /health 對一眼。 */
-const SERVER_VERSION = "2026-10-13-catalog-live";
+const SERVER_VERSION = "2026-10-13-catalog-site";
 
 /* 資料庫下載量統計（見 fbStats），由大到小排；重新部署會歸零。順便看作品照片搬家進度 */
 /* Cloudinary 方案和用量（大熊沒有 Cloudinary 登入密碼，改由伺服器用 API 查）。只回傳數字，不回傳密鑰 */
