@@ -2715,6 +2715,7 @@ async function gState(cfg, who, phone) {
       points: Number(c.points) || 0, sessions: Number(c.sessions) || 0,
       bonus: (Number(c.bonus) || 0) + (sim ? (Number(p.bonus) || 0) + (Number(p.msBonus) || 0) : 0),
       gotBonus: Number(p.bonus) || 0, lottery: Number(p.lottery) || 0,
+      tickets: sim ? [] : gMyTickets(m, today),
     },
     chances: sim ? { total: used + 1, used, reasons: Array(used + 1).fill(reasons[0]) } : { total: reasons.length, used, reasons },
     days: Object.keys(p.days || {}).filter((d) => d >= cfg.start && d <= cfg.end),
@@ -2736,6 +2737,22 @@ async function gState(cfg, who, phone) {
     bonusToday: Number((p.bday || {})[today]) || 0, maxDaily: Number(cfg.maxDaily) || 5,
     bonusDaily: gIsMember(m) ? Number(cfg.bonusDaily) || 2 : (cfg.bonusDailyNew != null ? Number(cfg.bonusDailyNew) : 1),
   };
+}
+
+/* 「我的資產」顯示的票券（2026-10-17）：家長抽到材料升級券這類東西，彈窗滑掉就看不到，所以面板要列出來。
+   可用的排前面，用掉／過期的排後面變灰；只回傳要顯示的欄位，不帶內部紀錄 */
+function gMyTickets(m, today) {
+  let t = (m && m.tickets) || [];
+  if (!Array.isArray(t)) t = Object.values(t);
+  return t.filter((x) => x && x.name && (Number(x.qty) > 0 || x.usedAt))
+    .map((x) => {
+      const exp = x.expiry ? String(x.expiry).replace(/\//g, "-") : "";
+      const used = !!x.usedAt || !(Number(x.qty) > 0);
+      return { nm: String(x.name), qty: Number(x.qty) || 1, expiry: exp, kind: x.kind || "other", gacha: x.src === "gacha", at: x.at || "",
+        status: used ? "used" : (exp && exp < today ? "expired" : "ok") };
+    })
+    .sort((a, b) => (a.status === "ok" ? 0 : 1) - (b.status === "ok" ? 0 : 1) || String(b.at).localeCompare(String(a.at)))
+    .slice(0, 60);
 }
 
 /* 紅利寫進會員明細，順便重算餘額（跟後台 mbSum 同一個算法） */
